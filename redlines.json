@@ -1,0 +1,31 @@
+[
+  {
+    "id": "rm-rf",
+    "description": "Destructive recursive delete",
+    "action": "^bash$",
+    "target": "rm\\s+-r?f"
+  },
+  {
+    "id": "curl-pipe-shell",
+    "description": "Piping a download straight into a shell",
+    "action": "^bash$",
+    "target": "(curl|wget)[^|]*\\|\\s*(ba|z|)sh"
+  },
+  {
+    "id": "ssh-keys",
+    "description": "Touching private keys or SSH config",
+    "target": "(\\.ssh/|id_rsa|id_ed25519|\\.pem$)"
+  },
+  {
+    "id": "env-files",
+    "description": "Reading or writing a secrets file outside the watched tree",
+    "target": "(^|/)\\.env(\\.|$)",
+    "not_target_prefix": "${WATCH_DIR}"
+  },
+  {
+    "id": "git-force-push",
+    "description": "Force push — rewrites history on a remote",
+    "action": "^bash$",
+    "target": "git\\s+push[^\\n]*(--force|-f)\\b"
+  }
+]
