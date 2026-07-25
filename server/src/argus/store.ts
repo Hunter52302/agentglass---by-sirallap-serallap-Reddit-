@@ -401,13 +401,15 @@ export function envSummary() {
  */
 export interface ActorLane {
   actor: string;
-  kind: "runtime" | "program" | "unattributed";
+  kind: "runtime" | "program" | "unattributed" | "shell";
   tier: EnvTier;
   count: number;
   last_ts: number;
   provider: string | null;
   /** Most recent events for this actor, newest first. */
   events: EnvEvent[];
+  /** Activity counts across equal buckets in the requested window. */
+  buckets: number[];
 }
 
 export function actorLanes(windowMs = 60 * 60_000, perLane = 8, buckets = 60): ActorLane[] {

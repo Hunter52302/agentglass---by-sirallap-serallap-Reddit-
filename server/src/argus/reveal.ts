@@ -43,7 +43,7 @@ export function toNative(p: string): string {
 }
 
 /** Has the environment tier actually seen this path, or anything under it? */
-function isKnownPath(norm: string): boolean {
+export function isKnownPath(norm: string): boolean {
   const exact = db
     .query(`SELECT 1 AS ok FROM env_events WHERE path = ? LIMIT 1`)
     .get(norm) as { ok: number } | null;

@@ -18,7 +18,12 @@ const store = new Map<string, string>();
   key: () => null,
   length: 0,
 } as unknown as Storage;
-(globalThis as unknown as { navigator: Navigator }).navigator ??= { platform: "Linux" } as Navigator;
+// Bun now exposes the host navigator, so `??=` would leave macOS in place and
+// turn these Linux expectations into platform-dependent tests.
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: { platform: "Linux" } as Navigator,
+});
 
 const ORDER = ["git", "diff", "docker", "term", "chat"] as const;
 const order = () => [...ORDER];

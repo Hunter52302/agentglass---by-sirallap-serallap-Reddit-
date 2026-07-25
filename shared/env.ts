@@ -192,10 +192,27 @@ export interface SuspectRollup {
 export interface RedlineRuleInfo {
   id: string;
   description: string;
+  enabled: boolean;
+  kind: "command" | "path" | "file" | "any";
   action: string | null;
   target: string | null;
-  /** Matching denies AND stops the process tree immediately, no human wait. */
+  operations: Array<"create" | "write" | "delete">;
+  protected_path: string | null;
+  decision: "flag" | "gate" | "kill";
+  /** Compatibility projection of decision=kill. */
   kill: boolean;
+}
+
+export interface RedlineRuleInput {
+  id: string;
+  description?: string;
+  enabled?: boolean;
+  kind?: RedlineRuleInfo["kind"];
+  action?: string | null;
+  target?: string | null;
+  operations?: RedlineRuleInfo["operations"];
+  protected_path?: string | null;
+  decision?: RedlineRuleInfo["decision"];
 }
 
 export interface RedlineStatus {

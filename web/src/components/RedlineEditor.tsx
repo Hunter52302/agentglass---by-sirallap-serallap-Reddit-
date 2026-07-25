@@ -1,30 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Portal } from "./Portal.tsx";
-import { SERVER, authHeaders } from "../lib/api.ts";
+import { useDialogs } from "./ConfirmDialog.tsx";
+import { api } from "../lib/api.ts";
+import type { RedlineRuleInfo, RedlineRuleInput, RedlineStatus } from "../../../shared/env.ts";
 
 type Decision = "flag" | "gate" | "kill";
 type Kind = "command" | "file" | "path" | "any";
 type Operation = "create" | "write" | "delete";
-
-interface Rule {
-  id: string;
-  description: string;
-  enabled: boolean;
-  kind: Kind;
-  action: string | null;
-  target: string | null;
-  operations: Operation[];
-  protected_path: string | null;
-  decision: Decision;
-  kill: boolean;
-}
-
-interface Status {
-  file: string;
-  loaded_from: string | null;
-  error: string | null;
-  rules: Rule[];
-}
 
 interface Draft {
   id: string;
@@ -50,18 +32,7 @@ const EMPTY: Draft = {
   decision: "gate",
 };
 
-async function post<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetch(SERVER + path, {
-    method: "POST",
-    headers: authHeaders({ "content-type": "application/json" }),
-    body: JSON.stringify(body),
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload?.error || `${path} → ${response.status}`);
-  return payload as T;
-}
-
-function asDraft(rule: Rule): Draft {
+function asDraft(rule: RedlineRuleInfo): Draft {
   return {
     id: rule.id,
     description: rule.description,
@@ -80,17 +51,16 @@ export function RedlineEditor({ open, onClose, onSaved }: {
   onClose: () => void;
   onSaved?: () => void;
 }) {
-  const [status, setStatus] = useState<Status | null>(null);
+  const [status, setStatus] = useState<RedlineStatus | null>(null);
   const [draft, setDraft] = useState<Draft>(EMPTY);
   const [editing, setEditing] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { ask, dialog } = useDialogs();
 
   const load = useCallback(async () => {
     try {
-      const r = await fetch(SERVER + "/env/redlines", { headers: authHeaders() });
-      if (!r.ok) throw new Error(`/env/redlines → ${r.status}`);
-      setStatus(await r.json());
+      setStatus(await api.envRedlines());
       setError(null);
     } catch (e: any) {
       setError(e?.message ?? String(e));
@@ -117,7 +87,7 @@ export function RedlineEditor({ open, onClose, onSaved }: {
     if (!canSave || busy) return;
     setBusy(true);
     try {
-      await post("/env/redlines/upsert", {
+      const rule: RedlineRuleInput = {
         id: draft.id.trim(),
         description: draft.description.trim() || draft.id.trim(),
         enabled: draft.enabled,
@@ -127,7 +97,9 @@ export function RedlineEditor({ open, onClose, onSaved }: {
         protected_path: draft.protected_path.trim() || null,
         operations: draft.operations,
         decision: draft.decision,
-      });
+      };
+      const result = await api.envUpsertRedline(rule);
+      if (!result.ok) throw new Error(result.error || "redline was not saved");
       await load();
       reset();
       onSaved?.();
@@ -139,10 +111,17 @@ export function RedlineEditor({ open, onClose, onSaved }: {
   };
 
   const remove = async (id: string) => {
-    if (busy || !confirm(`Remove redline “${id}”?`)) return;
+    if (busy) return;
+    if (!(await ask({
+      title: `Remove redline “${id}”?`,
+      body: "This policy will stop applying immediately.",
+      confirmLabel: "Remove redline",
+      danger: true,
+    }))) return;
     setBusy(true);
     try {
-      await post("/env/redlines/delete", { id });
+      const result = await api.envDeleteRedline(id);
+      if (!result.ok) throw new Error(result.error || "redline was not removed");
       await load();
       if (editing === id) reset();
       onSaved?.();
@@ -153,11 +132,12 @@ export function RedlineEditor({ open, onClose, onSaved }: {
     }
   };
 
-  const toggle = async (rule: Rule) => {
+  const toggle = async (rule: RedlineRuleInfo) => {
     if (busy) return;
     setBusy(true);
     try {
-      await post("/env/redlines/upsert", { ...rule, enabled: !rule.enabled, kill: undefined });
+      const result = await api.envUpsertRedline({ ...rule, enabled: !rule.enabled });
+      if (!result.ok) throw new Error(result.error || "redline was not updated");
       await load();
       onSaved?.();
     } catch (e: any) {
@@ -271,6 +251,7 @@ export function RedlineEditor({ open, onClose, onSaved }: {
           </div>
         </div>
       </div>
+      {dialog}
     </Portal>
   );
 }

@@ -80,6 +80,12 @@ interface Touch {
   ts: number;
 }
 
+export function compareMapNodes(a: MapNode, b: MapNode): number {
+  return a.kind !== b.kind
+    ? (a.kind === "dir" ? -1 : 1)
+    : a.name.localeCompare(b.name);
+}
+
 /** Longest common directory prefix, so the tree starts where the work is
  *  rather than at a drive root with fifteen empty levels above it. */
 function commonRoot(paths: string[]): string | null {
@@ -244,9 +250,7 @@ export function buildMap({ limit = 600, nodeCap = 400 }: { limit?: number; nodeC
     else byParent.set(parent, [n]);
   }
   for (const arr of byParent.values()) {
-    arr.sort((a, b) =>
-      a.kind !== b.kind ? (a.kind === "dir" ? -1 : 1) : a.name.localeCompare(b.name)
-    );
+    arr.sort(compareMapNodes);
   }
 
   const out: MapNode[] = [];

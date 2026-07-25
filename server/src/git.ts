@@ -10,7 +10,7 @@
 // scoped with `-C <root>`; commit paths are validated to stay inside the repo
 // root; and the whole feature can be killed with AGENTGLASS_COMMIT_DISABLED=1.
 
-import { resolve, dirname, relative, sep } from "node:path";
+import { resolve, dirname, basename, relative, sep } from "node:path";
 // readFileSync: /etc/wsl.conf, for the Windows drive translation below.
 import { readFileSync, statSync } from "node:fs";
 import { inScope, isUnderPath } from "./config.ts";
@@ -437,7 +437,8 @@ export function commit(root: string, files: string[], title: string, body: strin
   // commit was refused as "not a git repository root". resolve() is a no-op on
   // POSIX, where the two forms already agree.
   const topAbs = top.code === 0 ? resolve(top.stdout.trim() || ".") : "";
-  if (top.code !== 0 || topAbs !== absRoot) return { ok: false, error: "not a git repository root" };
+  const sameRoot = isUnderPath(topAbs, absRoot) && isUnderPath(absRoot, topAbs);
+  if (top.code !== 0 || !sameRoot) return { ok: false, error: "not a git repository root" };
   // The same boundary gitwork's guard() applies to staging, discarding and the
   // Source Control panel's own commit. This is the older commit-composer path
   // and it was the one mutating git endpoint that never checked: a cockpit

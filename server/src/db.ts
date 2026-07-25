@@ -1016,10 +1016,14 @@ function computeStatsSummary(windowMs: number, provider?: string): StatsSummary 
   const pf = prov + sc;
   const A = [since, ...pa, ...sa]; // bind order: timestamp, provider (if any), project (if any)
 
-  // Totals come from the authoritative sessions table for cost/tokens,
-  // and from events for counts/errors within the window.
-  // One pass, not two: both sets of totals cover exactly the same rows, and
-  // over a wide window each separate pass is a full scan of the table.
+  // Every total here is from events within the window — cost and tokens
+  // included — because /stats is a windowed view (last 15m / 1h / …), not a
+  // lifetime one: cost_usd summed over the window's events is the spend in that
+  // window, which is what the dashboard asks for. (The sessions table holds the
+  // authoritative lifetime totals; those are what getSessions serves per row,
+  // not what a window summary wants.) One pass, not several: counts, errors,
+  // sessions, tokens and cost all cover exactly these rows, and over a wide
+  // window each separate pass would be another full scan.
   const totals = db
     .query<any, any[]>(
       `SELECT COUNT(*) AS events,
@@ -1124,6 +1128,13 @@ function computeStatsSummary(windowMs: number, provider?: string): StatsSummary 
   const bucketCount = 60;
   const bucketMs = Math.max(1000, Math.floor(windowMs / bucketCount));
   const start = Math.floor(since / bucketMs) * bucketMs;
+  // The buckets are aligned DOWN from `since`, so they span [start, start +
+  // 60*bucketMs), whose upper edge is <= now — the most recent up-to-one-bucket
+  // of events (an event at `now` always) fell past the last bucket and vanished
+  // from the chart while still counting in the totals. Fold anything at or past
+  // the last bucket into it, so every event in the window lands somewhere and
+  // sum(bucket events) == totals.events.
+  const lastKey = start + (bucketCount - 1) * bucketMs;
   const buckets = new Map<number, TimeBucket>();
   for (let i = 0; i < bucketCount; i++) {
     const t = start + i * bucketMs;
@@ -1136,7 +1147,7 @@ function computeStatsSummary(windowMs: number, provider?: string): StatsSummary 
     .all(...A);
   const heatmap = new Array(168).fill(0);
   for (const r of tlRows) {
-    const t = Math.floor(r.timestamp / bucketMs) * bucketMs;
+    const t = Math.min(lastKey, Math.floor(r.timestamp / bucketMs) * bucketMs);
     const b = buckets.get(t);
     if (b) {
       b.events++;

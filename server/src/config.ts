@@ -187,8 +187,17 @@ export function workspaceRoot(): string | null {
  * be read on a Mac.
  */
 const WINDOWSISH = /^([A-Za-z]:[\\/]|\\\\)/;
-const normSep = (p: string) =>
-  (process.platform === "win32" || WINDOWSISH.test(p) ? p.replace(/\\/g, "/") : p).replace(/\/+$/, "");
+const normSep = (p: string) => {
+  let normalized = process.platform === "win32" || WINDOWSISH.test(p) ? p.replace(/\\/g, "/") : p;
+  // macOS exposes /var, /tmp, and /etc as symlinks into /private. Git and
+  // realpath-based APIs return the canonical spelling while tmpdir()/resolve()
+  // retain the public spelling. They are the same location and must not fail a
+  // scope boundary merely because each side chose a different alias.
+  if (process.platform === "darwin") {
+    normalized = normalized.replace(/^\/private(?=\/(?:var|tmp|etc)(?:\/|$))/, "");
+  }
+  return normalized.replace(/\/+$/, "");
+};
 
 export function isUnderPath(child: string, parent: string): boolean {
   const c = normSep(child);

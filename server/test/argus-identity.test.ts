@@ -31,7 +31,21 @@ describe("Argus identity boundary", () => {
   test("containment refuses invalid, system, self, and parent pids", () => {
     expect(killTree(0).skipped).toBe("invalid-pid");
     expect(killTree(1).skipped).toBe("invalid-pid");
+    expect(killTree(Number.NaN).skipped).toBe("invalid-pid");
     expect(killTree(process.pid).skipped).toBe("refuses-self-or-parent");
     expect(killTree(process.ppid).skipped).toBe("refuses-self-or-parent");
+  });
+
+  test.skipIf(process.platform === "win32")("containment stops only a verified test process tree", async () => {
+    const child = Bun.spawn(["sh", "-c", "sleep 30 & wait"], { stdout: "ignore", stderr: "ignore" });
+    try {
+      await Bun.sleep(100);
+      const result = killTree(child.pid);
+      expect(result.requested).toBe(child.pid);
+      expect(result.killed).toContain(child.pid);
+      expect(result.skipped).toBeUndefined();
+    } finally {
+      try { child.kill("SIGKILL"); } catch { /* already contained */ }
+    }
   });
 });

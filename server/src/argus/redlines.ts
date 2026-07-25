@@ -78,21 +78,44 @@ let currentWatchDir: string | null = null;
 function compile(raw: RedlineRuleDocument, watchDir: string | null): RedlineRule {
   const id = String(raw.id || "").trim();
   if (!id) throw new Error("every redline requires a non-empty id");
+  const kind: RedlineKind = raw.kind ?? (raw.protected_path ? "file" : "any");
+  if (!["command", "path", "file", "any"].includes(kind)) {
+    throw new Error(`redline ${id}: kind must be command, path, file, or any`);
+  }
   const decision: RedlineDecision = raw.kill === true ? "kill" : raw.decision ?? "gate";
   if (!["flag", "gate", "kill"].includes(decision)) {
     throw new Error(`redline ${id}: decision must be flag, gate, or kill`);
   }
-  const subst = (value: string | null | undefined) =>
-    value ? String(value).replaceAll("${WATCH_DIR}", watchDir ?? "") : null;
+  for (const [name, value] of [["action", raw.action], ["target", raw.target], ["protected_path", raw.protected_path], ["not_target_prefix", raw.not_target_prefix]] as const) {
+    if (value != null && typeof value !== "string") throw new Error(`redline ${id}: ${name} must be a string`);
+  }
+  const subst = (value: string | null | undefined) => {
+    if (!value) return null;
+    if (value.includes("${WATCH_DIR}") && !watchDir) return null;
+    return value.replaceAll("${WATCH_DIR}", watchDir ?? "");
+  };
   const protectedPath = subst(raw.protected_path);
+  const absoluteLike = (value: string) =>
+    path.isAbsolute(value) || /^[A-Za-z]:[\\/]/.test(value) || /^\\\\[^\\]/.test(value);
+  if (protectedPath && !absoluteLike(protectedPath)) {
+    throw new Error(`redline ${id}: protected_path must be absolute or use \${WATCH_DIR}`);
+  }
+  const operations = raw.operations ?? ["create", "write", "delete"];
+  if (!Array.isArray(operations) || operations.some((op) => !["create", "write", "delete"].includes(op))) {
+    throw new Error(`redline ${id}: operations must contain only create, write, or delete`);
+  }
+  if ((kind === "file" || kind === "path") && !raw.protected_path && !raw.target) {
+    throw new Error(`redline ${id}: ${kind} rules require protected_path or target`);
+  }
+  const waitingForWatchDir = !!raw.protected_path?.includes("${WATCH_DIR}") && !watchDir;
   return {
     id,
     description: String(raw.description || id),
-    enabled: raw.enabled !== false,
-    kind: raw.kind ?? (protectedPath ? "file" : "any"),
+    enabled: raw.enabled !== false && !waitingForWatchDir,
+    kind,
     action: raw.action ? new RegExp(raw.action, "i") : null,
     target: raw.target ? new RegExp(raw.target, "i") : null,
-    operations: new Set((raw.operations ?? ["create", "write", "delete"]).map(String)),
+    operations: new Set(operations),
     protected_path: protectedPath ? normalizePath(protectedPath) : null,
     not_target_prefix: raw.not_target_prefix
       ? normalizePath(subst(raw.not_target_prefix)!)
@@ -128,8 +151,10 @@ export function reloadRedlines(watchDir: string | null = currentWatchDir): void 
   try {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) throw new Error("expected a JSON array of rules");
-    documents = parsed.map((r) => ({ ...r }));
-    rules = documents.map((r) => compile(r, watchDir));
+    const candidates = parsed.map((r) => ({ ...r }));
+    const compiled = candidates.map((r) => compile(r, watchDir));
+    documents = candidates;
+    rules = compiled;
     loadedFrom = RULES_FILE;
   } catch (e: any) {
     loadError = e?.message ?? String(e);
@@ -164,9 +189,12 @@ export function redlineStatus() {
 export function upsertRedline(input: RedlineRuleDocument, watchDir: string | null = currentWatchDir) {
   // Compile first so a bad regex never corrupts the live file.
   compile(input, watchDir);
+  if (loadError) throw new Error(`cannot update invalid redline file: ${loadError}`);
   const id = String(input.id).trim();
   const next = documents.filter((r) => String(r.id).trim() !== id);
   next.push({ ...input, id });
+  // Validate the complete replacement before the atomic rename.
+  next.forEach((rule) => compile(rule, watchDir));
   writeDocuments(next);
   reloadRedlines(watchDir);
   if (loadError) throw new Error(loadError);

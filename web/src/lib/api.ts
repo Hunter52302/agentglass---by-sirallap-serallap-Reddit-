@@ -1,5 +1,5 @@
-import type { WatchEvent, SessionRollup, StatsSummary, SkillInfo, FileChange, DiffHunk, Insight, SearchHit, PendingGate, GateRecord, SessionDetail, GitStatusResponse, CommitResult, WalkthroughResult, WalkthroughInputFile, GitRepoRef, FsCompletion, WorkingTree, GitActionResult, GitBranch, GitCommit, GitStash, GitGraphLine, GitWorktree, WorktreeLeftovers, GitRemote, GitRemoteBranch, GitTag, GitReflogEntry, GitLogEntry, DockerOverview, DockerStat, DockerActionResult, DockerCapability, TerminalCommands, ChatImage, ConflictBlock, BlockChoice, UpdateStatus, ReleaseNotes, PrListResponse, PrDetail, PrActionResult, GitCapability } from "../../../shared/types.ts";
-import type { EnvTierStatus, EnvSummary, EnvRuntime, EnvConnection, EnvEvent, FsMap, ActorLane, SuspectRollup, EnvTier, RedlineStatus, KillableGate, ReplayBounds, ReplayState, PtyShell } from "../../../shared/env.ts";
+import type { WatchEvent, SessionRollup, StatsSummary, SkillInfo, FileChange, DiffHunk, Insight, SearchHit, PendingGate, GateRecord, SessionDetail, GitStatusResponse, CommitResult, WalkthroughResult, WalkthroughInputFile, GitRepoRef, FsCompletion, WorkingTree, GitActionResult, GitBranch, GitCommit, GitStash, GitGraphLine, GitWorktree, WorktreeLeftovers, GitRemote, GitRemoteBranch, GitTag, GitReflogEntry, GitLogEntry, DockerOverview, DockerStat, DockerActionResult, DockerCapability, TerminalCommands, ChatImage, ConflictBlock, BlockChoice, UpdateStatus, ReleaseNotes, PrListResponse, PrDetail, PrActionResult, GitCapability, HookSetupStatus, HookSetupResult } from "../../../shared/types.ts";
+import type { EnvTierStatus, EnvSummary, EnvRuntime, EnvConnection, EnvEvent, FsMap, ActorLane, SuspectRollup, EnvTier, RedlineRuleInput, RedlineStatus, KillableGate, ReplayBounds, ReplayState, PtyShell } from "../../../shared/env.ts";
 import * as demo from "./demo.ts";
 
 export const IS_DEMO = demo.IS_DEMO;
@@ -21,10 +21,17 @@ const DESKTOP_API: string | undefined =
     ? (window as unknown as { agentglass?: { apiOrigin?: string } }).agentglass?.apiOrigin
     : undefined;
 
+// Bun unit tests import modules that depend on the API without a DOM. Keep
+// module evaluation pure there; browser builds still use the real page host.
+const PAGE_LOCATION =
+  typeof location !== "undefined"
+    ? location
+    : { origin: "http://localhost:4000", hostname: "localhost" };
+
 export const SERVER: string =
   (import.meta.env.VITE_CW_SERVER as string | undefined)?.replace(/\/$/, "") ||
   DESKTOP_API?.replace(/\/$/, "") ||
-  (SERVED_BY_API ? location.origin : `http://${location.hostname}:4000`);
+  (SERVED_BY_API ? PAGE_LOCATION.origin : `http://${PAGE_LOCATION.hostname}:4000`);
 
 /**
  * Whether the line above *guessed* the origin rather than being told it.
@@ -227,6 +234,11 @@ const realApi = {
   envSetScope: (all: boolean) => post<{ ok: boolean; status: EnvTierStatus }>(`/env/scope`, { all }),
   // Redlines: the policy layer + the escalation agentglass's gate cannot do.
   envRedlines: () => get<RedlineStatus>(`/env/redlines`),
+  envReloadRedlines: () => post<RedlineStatus & { ok: boolean }>(`/env/redlines/reload`, {}),
+  envUpsertRedline: (rule: RedlineRuleInput) =>
+    post<RedlineStatus & { ok: boolean }>(`/env/redlines/upsert`, rule),
+  envDeleteRedline: (id: string) =>
+    post<RedlineStatus & { ok: boolean; found: boolean }>(`/env/redlines/delete`, { id }),
   envKillable: () => get<KillableGate[]>(`/env/gate/killable`),
   envKillGate: (id: string) => post<{ ok: boolean; denied?: boolean; killed?: unknown; error?: string }>(`/env/gate/kill`, { id }),
   // Replay: state at an instant, folded from the append-only table.
@@ -363,6 +375,11 @@ const realApi = {
   updateNotes: (tag?: string) => get<ReleaseNotes>(`/update/notes${tag ? `?tag=${encodeURIComponent(tag)}` : ""}`),
   updateRun: () => post<{ ok: boolean; error?: string }>("/update/run", {}),
   updateLog: () => get<{ ok: boolean; text: string }>("/update/log"),
+  // Claude Code hook wiring (#187): read state, and turn it on/off by writing
+  // ~/.claude/settings.json server-side (idempotent, backed up first).
+  hooksStatus: () => get<HookSetupStatus>("/hooks/status"),
+  hooksInstall: () => post<HookSetupResult>("/hooks/install", {}),
+  hooksUninstall: () => post<HookSetupResult>("/hooks/uninstall", {}),
   dockerInspect: (id: string) => get<{ ok: boolean; env: string[]; config: string; error?: string }>(`/docker/inspect?id=${encodeURIComponent(id)}`),
   dockerTop: (id: string) => get<{ ok: boolean; text: string; error?: string }>(`/docker/top?id=${encodeURIComponent(id)}`),
   // --- pull requests (gh-backed) ---
@@ -505,6 +522,9 @@ const demoApi: typeof realApi = {
   envSetWatch: () => D({ ok: false, status: DEMO_ENV_STATUS }),
   envSetScope: () => D({ ok: false, status: DEMO_ENV_STATUS }),
   envRedlines: () => D({ file: "", loaded_from: null, error: null, rules: [] }),
+  envReloadRedlines: () => D({ ok: false, file: "", loaded_from: null, error: "the demo is read-only", rules: [] }),
+  envUpsertRedline: (_rule: RedlineRuleInput) => D({ ok: false, file: "", loaded_from: null, error: "the demo is read-only", rules: [] }),
+  envDeleteRedline: (_id: string) => D({ ok: false, found: false, file: "", loaded_from: null, error: "the demo is read-only", rules: [] }),
   envKillable: () => D([]),
   // Never in the demo: killing a process is irreversible and there is no
   // process here to kill. Refused explicitly rather than faked as success.
@@ -588,6 +608,9 @@ const demoApi: typeof realApi = {
   updateNotes: (_tag?: string) => D({ ok: false, tag: "", notes: "", source: "", error: "not available in the demo" } as ReleaseNotes),
   updateStatus: () => D({ ok: true, available: false, info: { version: "demo", commit: "", builtAt: "", source: "", origin: "", baseTag: "", distance: 0 }, branch: "", behind: 0, ahead: 0, incoming: [], blocked: "not available in the demo" } as UpdateStatus),
   updateRun: () => D({ ok: false, error: "not available in the demo" }),
+  hooksStatus: () => D({ installed: false, bundled: false, settingsPath: "~/.claude/settings.json", python: "python3" } as HookSetupStatus),
+  hooksInstall: () => D({ ok: false, installed: false, changed: false, settingsPath: "~/.claude/settings.json", error: "not available in the demo" } as HookSetupResult),
+  hooksUninstall: () => D({ ok: false, installed: false, changed: false, settingsPath: "~/.claude/settings.json", error: "not available in the demo" } as HookSetupResult),
   updateLog: () => D({ ok: true, text: "" }),
   dockerInspect: (_id: string) => D({ ok: false, env: [] as string[], config: "", error: "not available in the demo" }),
   dockerTop: (_id: string) => D({ ok: false, text: "", error: "not available in the demo" }),

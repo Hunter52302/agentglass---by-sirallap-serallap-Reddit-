@@ -30,6 +30,8 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Portal } from "./Portal.tsx";
+import { RedlineEditor } from "./RedlineEditor.tsx";
+import { useDialogs } from "./ConfirmDialog.tsx";
 import { usePoll } from "../lib/usePoll.ts";
 import { api } from "../lib/api.ts";
 import type {
@@ -143,6 +145,8 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
   const [replay, setReplay] = useState<ReplayState | null>(null);
   const [shells, setShells] = useState<PtyShell[]>([]);
   const [openShell, setOpenShell] = useState<string | null>(null);
+  const [redlineEditorOpen, setRedlineEditorOpen] = useState(false);
+  const { ask, dialog } = useDialogs();
 
   const refresh = useCallback(() => {
     api.envStatus().then(setStatus).catch(() => {});
@@ -174,10 +178,10 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
 
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !redlineEditorOpen) onClose(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  }, [open, onClose, redlineEditorOpen]);
 
   const toggleFs = async () => {
     if (busy) return;
@@ -219,6 +223,16 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
       if (!r.ok) console.error("[argus] kill refused:", r.error);
       refresh();
     } finally { setBusy(false); }
+  };
+
+  const confirmKill = async (id: string, pid: number) => {
+    if (!(await ask({
+      title: `Deny and force-stop pid ${pid}?`,
+      body: "Argus will stop this verified process and every descendant. This is irreversible.",
+      confirmLabel: "Deny and kill",
+      danger: true,
+    }))) return;
+    await denyAndKill(id);
   };
 
   const decide = async (id: string, d: "allow" | "deny") => {
@@ -408,7 +422,7 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
                           so it confirms, and it only appears when the hook told
                           us a pid — otherwise there is nothing to stop. */}
                       <button
-                        onClick={() => { if (confirm(`Deny AND force-stop pid ${k?.pid} and every process under it?\n\nThis is irreversible.`)) void denyAndKill(g.id); }}
+                        onClick={() => { if (k) void confirmKill(g.id, k.pid); }}
                         disabled={busy || !k}
                         title={k ? `Stops pid ${k.pid} and its children` : "This request carries no pid — nothing to kill"}
                         className="px-2 py-0.5 rounded text-[10px] transition-opacity hover:opacity-80 disabled:opacity-30"
@@ -540,6 +554,13 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
                 One lane per thing that did something, with its activity over the last hour.
                 Click to filter the feed.
               </p>
+              <button
+                onClick={() => setRedlineEditorOpen(true)}
+                className="mt-2 px-2 py-1 rounded text-[10px] font-medium transition-opacity hover:opacity-80"
+                style={{ color: "var(--primary-hover)", background: "color-mix(in srgb, var(--primary) 14%, transparent)" }}
+              >
+                manage redlines
+              </button>
               {redlines && (
                 <p className="text-[10px] mt-2 leading-relaxed"
                   style={{ color: redlines.error ? "var(--error)" : "var(--text4)" }}>
@@ -642,6 +663,12 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
           </div>
         </div>
       </div>
+      <RedlineEditor
+        open={redlineEditorOpen}
+        onClose={() => setRedlineEditorOpen(false)}
+        onSaved={refresh}
+      />
+      {dialog}
     </Portal>
   );
 }

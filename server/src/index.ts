@@ -72,10 +72,11 @@ import { buildMap } from "./argus/map.ts";
 import { revealPath, REVEAL_ENABLED } from "./argus/reveal.ts";
 import {
   evaluate as evaluateRedline, noteGate, gateExtra, killGate, killableGates,
-  redlineStatus, reloadRedlines, killTree,
+  redlineStatus, reloadRedlines, upsertRedline, deleteRedline, killTree,
 } from "./argus/redlines.ts";
 import { startScanner, ownsSession, knownProjects, resyncScope, SCAN_ENABLED } from "./transcripts.ts";
 import { workspaceRoot, setWorkspaceRoot, inScope, CONFIG_PATH } from "./config.ts";
+import { hookStatus, applyHooks } from "./hooksetup.ts";
 import { privateHost } from "./net.ts";
 import { resolveToken, tokenOk, isIntake, isAuthExempt } from "./auth.ts";
 import { updateStatus, startUpdate, updateLog, releaseNotes } from "./selfupdate.ts";
@@ -689,6 +690,16 @@ const server = Bun.serve<WsData>({
       if (res.ok) await resyncScope();
       return json(res, res.ok ? 200 : 400);
     }
+    // Claude Code hook wiring (#187): a packaged install can turn on live
+    // streaming + gating from Settings instead of cloning the repo to run a
+    // Python script. GET reports state; POST writes ~/.claude/settings.json with
+    // the same idempotent, backup-first merge the CLI installer uses.
+    if (pathname === "/hooks/status") return json(hookStatus());
+    if ((pathname === "/hooks/install" || pathname === "/hooks/uninstall") && req.method === "POST") {
+      if (!localOrigin(req)) return csrfBlocked();
+      return json(applyHooks(pathname === "/hooks/install" ? "install" : "uninstall"));
+    }
+
     if (pathname === "/insights") return json({ insights: getInsights() });
     if (pathname === "/usage") return json(await getUsage()); // Anthropic plan-limit windows (only meaningful for Claude)
 
@@ -711,7 +722,7 @@ const server = Bun.serve<WsData>({
       if (gateId) {
         noteGate(gateId, {
           pid: Number.isInteger(proposedPid) && proposedPid > 1 ? proposedPid : null,
-          rule: rule ? { id: rule.id, description: rule.description, kill: rule.kill } : null,
+          rule: rule ? { id: rule.id, description: rule.description, decision: rule.decision, kill: rule.kill } : null,
           created: Date.now(),
         });
       }
@@ -1215,6 +1226,24 @@ const server = Bun.serve<WsData>({
       if (!localOrigin(req)) return csrfBlocked();
       reloadRedlines(workspaceRoot());
       return json({ ok: true, ...redlineStatus() });
+    }
+    if (pathname === "/env/redlines/upsert" && req.method === "POST") {
+      if (!localOrigin(req)) return csrfBlocked();
+      let b: any = {};
+      try { b = await req.json(); } catch { return json({ ok: false, error: "invalid json" }, 400); }
+      try {
+        return json({ ok: true, ...upsertRedline(b, workspaceRoot()) });
+      } catch (e: any) {
+        return json({ ok: false, error: e?.message ?? String(e) }, 400);
+      }
+    }
+    if (pathname === "/env/redlines/delete" && req.method === "POST") {
+      if (!localOrigin(req)) return csrfBlocked();
+      let b: any = {};
+      try { b = await req.json(); } catch { return json({ ok: false, error: "invalid json" }, 400); }
+      const id = String(b.id || "").trim();
+      if (!id) return json({ ok: false, error: "id required" }, 400);
+      return json({ ok: true, ...deleteRedline(id, workspaceRoot()) });
     }
     if (pathname === "/env/gate/killable") return json(killableGates());
     if (pathname === "/env/gate/kill" && req.method === "POST") {
