@@ -1,12 +1,11 @@
-// Glasses for Argus — scoped agent-integrity and development provenance.
+// Glasses for Argus — agent runtime integrity, provenance, and intervention.
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md for provenance.
 //
-// Argus deliberately stops at the active AgentGlass workspace boundary here.
-// It compares what agents report with what the selected project actually does.
-// It is not an endpoint-security product: host-wide process, socket, boot,
-// driver, registry, persistence, packet-content, and enforcement collection are
-// outside this foundation.
+// AgentGlass describes what agents report. Argus observes the runtime layers
+// beneath and around that report: recognized agent processes, relevant network
+// metadata, attached shells, and opt-in filesystem effects. Broad observation is
+// available only when the operator deliberately points the lens there.
 
 import { realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
@@ -29,31 +28,23 @@ const num = (name: string, dflt: number) => {
   return Number.isFinite(v) && v > 0 ? v : dflt;
 };
 
-/**
- * The tier may exist without starting a sensor. This keeps the UI/API stable
- * while making every observation capability an explicit operator decision.
- */
 export const ENV_TIER_ENABLED = flag("GLASSES_ENV_TIER", true);
 
-/**
- * Experimental supporting sensors. They are OFF by default because continuous
- * host process/socket observation belongs to the deferred host-security
- * identity, not the current agent-integrity foundation.
- */
-export const PROCESS_SCAN = flag("GLASSES_PROCESS_SCAN", false);
-export const NETWORK_SCAN = flag("GLASSES_NETWORK_SCAN", false);
+// Recognized agent/runtime discovery is part of Argus's normal integrity view.
+// Command lines remain off unless explicitly requested.
+export const PROCESS_SCAN = flag("GLASSES_PROCESS_SCAN", true);
+export const NETWORK_SCAN = flag("GLASSES_NETWORK_SCAN", true);
 
 const stored = readSettings();
-
-/** Filesystem observation remains opt-in and is always project-scoped. */
 export const FS_WATCH = resolveFlag("GLASSES_FS_WATCH", stored.fs_enabled, false);
 
 const PROCESS_POLL_MS = num("GLASSES_PROCESS_POLL_MS", 5000);
 const NETWORK_POLL_MS = num("GLASSES_NETWORK_POLL_MS", 10000);
 const INCLUDE_CMDLINE = flag("GLASSES_PROCESS_CMDLINE", false);
 
-/** Never widened by the current product identity. */
-const NETWORK_ALL = false;
+// AI/agent-relevant network metadata is the default. Every-process network
+// visibility is an explicit operator choice and may be toggled live.
+const NETWORK_ALL = resolveFlag("GLASSES_NETWORK_ALL", stored.network_all, false);
 const OLLAMA_URL = process.env.GLASSES_OLLAMA_URL || "http://127.0.0.1:11434";
 
 const TIER_OF: Record<string, EnvTier> = {
@@ -63,23 +54,13 @@ const TIER_OF: Record<string, EnvTier> = {
   pty: "pty",
 };
 
-/** Map an Argus event onto the flat, queryable environment row. */
 export function toEnvEvent(a: ArgusEvent): EnvEvent | null {
   const tier = TIER_OF[a.surface];
   if (!tier) return null;
   const p = a.payload || {};
-
   const detail: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(p)) {
-    if (
-      ![
-        "node_id", "node_kind", "pid", "ppid", "runtime", "provider",
-        "runtime_kind", "process", "remote_host", "remote_ip", "remote_port",
-        "path", "fidelity", "label",
-      ].includes(k)
-    ) {
-      detail[k] = v;
-    }
+    if (!["node_id", "node_kind", "pid", "ppid", "runtime", "provider", "runtime_kind", "process", "remote_host", "remote_ip", "remote_port", "path", "fidelity", "label"].includes(k)) detail[k] = v;
   }
   if (p.label !== undefined) detail.label = p.label;
   if (p.ai_endpoint !== undefined) detail.ai_endpoint = p.ai_endpoint;
@@ -124,7 +105,7 @@ export interface EnvTierStatus {
 let status: EnvTierStatus = {
   enabled: false,
   process: { enabled: false, poll_ms: PROCESS_POLL_MS, cmdline: INCLUDE_CMDLINE },
-  network: { enabled: false, poll_ms: NETWORK_POLL_MS, all: false },
+  network: { enabled: false, poll_ms: NETWORK_POLL_MS, all: NETWORK_ALL },
   file: { enabled: false, available: false, dir: null },
   platform: process.platform,
 };
@@ -134,9 +115,7 @@ export function envTierStatus(): EnvTierStatus {
 }
 
 export interface StartEnvTierOpts {
-  /** Called for every persisted environment event, for live broadcast. */
   onEvent?: (e: EnvEvent) => void;
-  /** Initial active AgentGlass workspace. */
   fsDir?: string | null;
   retentionDays?: number;
 }
@@ -162,7 +141,7 @@ function canonicalExisting(p: string): string | null {
   }
 }
 
-/** True only when target is the active workspace or a descendant of it. */
+/** Used for provenance labels and tests; broad mode may deliberately exceed it. */
 export function isArgusWorkspacePath(target: string, root = workspaceRoot()): boolean {
   if (!root) return false;
   const canonicalRoot = canonicalExisting(root);
@@ -173,29 +152,33 @@ export function isArgusWorkspacePath(target: string, root = workspaceRoot()): bo
 }
 
 function startFsWatcher(dir: string): void {
-  fsHandle = startWatcher(
-    dir,
-    (change) => {
-      sink?.({
-        ts: change.ts,
-        agent_id: null,
-        parent_id: null,
-        surface: "file",
-        action: change.action,
-        target: change.path,
-        status: "ok",
-        payload: { path: change.path, diff: change.diff, fidelity: "fs_observed" },
-      });
-    },
-    { exclude: selfPaths() },
-  );
+  fsHandle = startWatcher(dir, (change) => {
+    sink?.({
+      ts: change.ts,
+      agent_id: null,
+      parent_id: null,
+      surface: "file",
+      action: change.action,
+      target: change.path,
+      status: "ok",
+      payload: {
+        path: change.path,
+        diff: change.diff,
+        fidelity: "fs_observed",
+        scope: isArgusWorkspacePath(dir) ? "workspace" : "operator_expanded",
+      },
+    });
+  }, { exclude: selfPaths() });
   status.file = { enabled: true, available: fsHandle.available, dir };
 }
 
 /**
- * Enable, disable, or move filesystem observation. The requested path must be
- * the active workspace or one of its descendants. Whole-machine, home-folder,
- * sibling-project, and arbitrary-path watching are refused by construction.
+ * Enable, disable, or move filesystem observation.
+ *
+ * The tier is off by default. Supplying a directory is the operator's explicit
+ * scope decision. It may be the workspace, a parent, a drive root, or `/`.
+ * Argus labels non-workspace observation as operator-expanded rather than
+ * pretending it is agent-attributed.
  */
 export async function setFsWatch({ enabled, dir }: { enabled: boolean; dir?: string | null }): Promise<EnvTierStatus> {
   await fsHandle?.close();
@@ -207,29 +190,25 @@ export async function setFsWatch({ enabled, dir }: { enabled: boolean; dir?: str
     return status;
   }
 
-  const root = workspaceRoot();
-  const requested = dir || root || null;
-  if (!requested || !root || !isArgusWorkspacePath(requested, root)) {
-    console.error("[argus] filesystem observation refused: choose the active workspace or a descendant");
-    status.file = { enabled: false, available: false, dir: root ?? null };
-    writeSettings({ fs_enabled: false, fs_dir: root ?? null });
+  const requested = dir || status.file.dir || process.env.GLASSES_FS_DIR || workspaceRoot() || null;
+  const target = requested ? canonicalExisting(requested) : null;
+  if (!target) {
+    console.error("[argus] filesystem observation refused: choose an existing directory");
+    status.file = { enabled: false, available: false, dir: requested };
+    writeSettings({ fs_enabled: false, fs_dir: requested });
     return status;
   }
 
-  const target = canonicalExisting(requested)!;
   startFsWatcher(target);
   writeSettings({ fs_enabled: true, fs_dir: target });
   return status;
 }
 
-/**
- * Identity-3 boundary: the current foundation never widens socket collection to
- * every program. Kept for API compatibility; requests to widen are refused.
- */
-export function setNetworkScope(_all: boolean): EnvTierStatus {
-  status.network.all = false;
-  netAdapter?.setAll(false);
-  writeSettings({ network_all: false });
+/** AI-relevant by default; true is an explicit whole-network diagnostic lens. */
+export function setNetworkScope(all: boolean): EnvTierStatus {
+  status.network.all = all;
+  netAdapter?.setAll(all);
+  writeSettings({ network_all: all });
   return status;
 }
 
@@ -254,32 +233,28 @@ export function startEnvTier({ onEvent, fsDir, retentionDays = 0 }: StartEnvTier
   const adapters: Array<{ stop: () => void | Promise<void> }> = [];
 
   if (PROCESS_SCAN) {
-    const proc = new ProcessAdapter({
-      pollMs: PROCESS_POLL_MS,
-      includeCommand: INCLUDE_CMDLINE,
-      ollamaUrl: OLLAMA_URL,
-    });
+    const proc = new ProcessAdapter({ pollMs: PROCESS_POLL_MS, includeCommand: INCLUDE_CMDLINE, ollamaUrl: OLLAMA_URL });
     void proc.start(ctx);
     adapters.push(proc);
     status.process.enabled = true;
   }
 
   if (NETWORK_SCAN) {
-    netAdapter = new NetworkAdapter({ pollMs: NETWORK_POLL_MS, all: false });
+    netAdapter = new NetworkAdapter({ pollMs: NETWORK_POLL_MS, all: NETWORK_ALL });
     void netAdapter.start(ctx);
     adapters.push(netAdapter);
     status.network.enabled = true;
-    status.network.all = false;
+    status.network.all = NETWORK_ALL;
   }
 
-  const root = workspaceRoot() || fsDir || null;
-  status.file.dir = root;
+  status.file.dir = process.env.GLASSES_FS_DIR || stored.fs_dir || fsDir || workspaceRoot() || null;
   if (FS_WATCH) {
-    if (root && isArgusWorkspacePath(root, root)) startFsWatcher(canonicalExisting(root)!);
+    const target = status.file.dir ? canonicalExisting(status.file.dir) : null;
+    if (target) startFsWatcher(target);
     else {
-      console.error("[argus] filesystem observation requested without an active workspace; tier remains off");
-      status.file = { enabled: false, available: false, dir: root };
-      writeSettings({ fs_enabled: false, fs_dir: root });
+      console.error("[argus] filesystem observation requested without a valid directory; tier remains off");
+      status.file = { enabled: false, available: false, dir: status.file.dir };
+      writeSettings({ fs_enabled: false });
     }
   }
 
@@ -294,9 +269,9 @@ export function startEnvTier({ onEvent, fsDir, retentionDays = 0 }: StartEnvTier
 
   status.enabled = true;
   const bits = [
-    status.process.enabled ? `experimental process ${PROCESS_POLL_MS}ms` : null,
-    status.network.enabled ? `experimental AI-only network ${NETWORK_POLL_MS}ms` : null,
-    status.file.enabled ? `project files ${status.file.available ? status.file.dir : "unavailable"}` : null,
+    status.process.enabled ? `agent processes ${PROCESS_POLL_MS}ms` : null,
+    status.network.enabled ? `network ${NETWORK_POLL_MS}ms${status.network.all ? " (every process)" : " (AI/agent relevant)"}` : null,
+    status.file.enabled ? `files ${status.file.available ? status.file.dir : "unavailable"}` : null,
   ].filter(Boolean);
   console.log(`   Argus → ${bits.length ? bits.join(", ") : "ready; no observation enabled"}`);
 
@@ -304,7 +279,7 @@ export function startEnvTier({ onEvent, fsDir, retentionDays = 0 }: StartEnvTier
     status: envTierStatus,
     stop: async () => {
       if (pruneTimer) clearInterval(pruneTimer);
-      for (const a of adapters) await a.stop();
+      for (const adapter of adapters) await adapter.stop();
       await fsHandle?.close();
       fsHandle = null;
       netAdapter = null;
