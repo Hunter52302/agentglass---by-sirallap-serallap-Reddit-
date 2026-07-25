@@ -38,8 +38,15 @@ beforeAll(async () => {
 
 const FIXTURES = ["b-many", "b-usage", "b-oversize", "b-drift"];
 afterAll(() => {
-  process.env.AGENTGLASS_SCAN_BATCH_LINES = priorBatchLines;
-  process.env.AGENTGLASS_SCAN_BATCH_BYTES = priorBatchBytes;
+  // Restore by DELETING when the variable was absent. `process.env.X = undefined`
+  // stores the string "undefined", which is truthy — so the old restore left
+  // every later suite with a garbage batch size instead of the default.
+  const restore = (k: string, v: string | undefined) => {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  };
+  restore("AGENTGLASS_SCAN_BATCH_LINES", priorBatchLines);
+  restore("AGENTGLASS_SCAN_BATCH_BYTES", priorBatchBytes);
   if (!db) return;
   const marks = FIXTURES.map(() => "?").join(",");
   for (const t of ["events", "sessions", "transcript_files"]) {
@@ -166,7 +173,9 @@ describe("batched transcript sweep", () => {
       // next sweep does not re-read the giant.
       expect(progress("oversize")?.lines_done).toBe(3);
     } finally {
-      process.env.AGENTGLASS_SCAN_MAX_LINE_BYTES = prior;
+      // Delete when it was absent — assigning undefined stores "undefined".
+      if (prior === undefined) delete process.env.AGENTGLASS_SCAN_MAX_LINE_BYTES;
+      else process.env.AGENTGLASS_SCAN_MAX_LINE_BYTES = prior;
     }
   });
 });

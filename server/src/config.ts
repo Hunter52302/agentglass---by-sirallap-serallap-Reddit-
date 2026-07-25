@@ -131,14 +131,37 @@ export function workspaceRoot(): string | null {
  * beside `~/code/orbit`), which no prefix test can ever match; that is the whole
  * reason this consults git rather than the path alone.
  */
+/**
+ * Is `child` the same path as, or inside, `parent`?
+ *
+ * Separator-agnostic on purpose, and this is not pedantry — it is the single
+ * most expensive bug in this codebase on Windows. A hardcoded `parent + "/"`
+ * never matches there, because `resolve()` yields backslashes; and the two
+ * sides genuinely disagree in practice, since Claude Code reports
+ * `project_path` with forward slashes and `cwd` with backslashes in the SAME
+ * payload. Every containment test built on a literal "/" therefore returned
+ * false, which surfaced as "outside the open project" refusals, "invalid path"
+ * errors, and scope filters that silently matched nothing.
+ *
+ * Compare on a normalised form instead, so either spelling of the same location
+ * answers the same way.
+ */
+const normSep = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+
+export function isUnderPath(child: string, parent: string): boolean {
+  const c = normSep(child);
+  const p = normSep(parent);
+  return c === p || c.startsWith(p + "/");
+}
+
 export function inScope(path: string | null | undefined, scope = workspaceRoot()): boolean {
   if (!scope) return true; // whole-machine: nothing to enforce
   if (!path) return false;
   const p = resolve(expand(path));
   // The plain prefix test first: it answers every non-worktree case without a
   // subprocess, including the container-folder scope where the family is moot.
-  if (p === scope || p.startsWith(scope + "/")) return true;
-  return worktreeFamily(scope).some((r) => p === r || p.startsWith(r + "/"));
+  if (isUnderPath(p, scope)) return true;
+  return worktreeFamily(scope).some((r) => isUnderPath(p, r));
 }
 
 /** The directories a scoped instance is about: the project plus its linked

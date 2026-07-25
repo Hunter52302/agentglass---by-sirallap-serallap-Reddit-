@@ -1545,7 +1545,13 @@ function parseWorktreeList(stdout: string, root: string): GitWorktree[] {
     cur = null;
   };
   for (const line of stdout.split("\n")) {
-    if (line.startsWith("worktree ")) { flush(); cur = { path: line.slice(9) }; }
+    // Normalized at the boundary, like repoRoot(). git answers with forward
+    // slashes on Windows while everything downstream — `resolve()`, the scope
+    // checks, the caller's own `join()`-built paths — uses backslashes. Leaving
+    // git's spelling in the public shape meant these paths never compared equal
+    // to anything: worktree lookups keyed by path missed, `current` was never
+    // true, and the UI showed a checkout it could not then act on.
+    if (line.startsWith("worktree ")) { flush(); cur = { path: resolve(line.slice(9)) }; }
     else if (!line) flush();
     else if (!cur) continue;
     else if (line.startsWith("HEAD ")) cur.head = line.slice(5, 12);

@@ -13,7 +13,7 @@
 import { resolve, dirname, relative, sep } from "node:path";
 // readFileSync: /etc/wsl.conf, for the Windows drive translation below.
 import { readFileSync, statSync } from "node:fs";
-import { inScope } from "./config.ts";
+import { inScope, isUnderPath } from "./config.ts";
 import { record } from "./gitlog.ts";
 import { currentLabel, resumedAs } from "./loopwatch.ts";
 import { withSpawnSlot } from "./spawnpool.ts";
@@ -199,7 +199,7 @@ export function safeAbs(p: unknown): string | null {
   const drive = p.match(WINDOWS_DRIVE);
   if (drive && AUTOMOUNT_ROOT) {
     const mount = AUTOMOUNT_ROOT + drive[1]!.toLowerCase();
-    if (abs !== mount && !abs.startsWith(mount + "/")) return null;
+    if (!isUnderPath(abs, mount)) return null;
   }
   return abs;
 }

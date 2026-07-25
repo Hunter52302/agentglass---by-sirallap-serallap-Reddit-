@@ -75,8 +75,24 @@ export const SCAN_ENABLED = process.env.AGENTGLASS_SCAN_DISABLED !== "1";
 // `bun test` runs every file in one process, so a module-level constant would be
 // fixed by whichever test imported this module first, defeating any test that
 // overrides them. It is a handful of env reads per file — nothing measurable.
-const batchLines = () => Math.max(1, Number(process.env.AGENTGLASS_SCAN_BATCH_LINES || 500));
-const batchBytes = () => Math.max(64 * 1024, Number(process.env.AGENTGLASS_SCAN_BATCH_BYTES || 1024 * 1024));
+/**
+ * A knob read from the environment, defaulting on anything that is not a
+ * positive number.
+ *
+ * `Number(x || d)` is not enough: any non-numeric string is truthy, so it
+ * skipped the default and produced NaN — and `Math.max(1, NaN)` is NaN, which
+ * made the batch loop stop making progress and the sweep hang until its caller
+ * timed out. Reached in practice because `process.env.X = undefined` stores the
+ * literal string "undefined" rather than clearing the key, so a test restoring
+ * an absent variable wedged the scanner for every file after it. A garbage
+ * value from an operator's shell deserves the same treatment.
+ */
+const envNum = (name: string, dflt: number, min: number) => {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) && n > 0 ? Math.max(min, n) : dflt;
+};
+const batchLines = () => envNum("AGENTGLASS_SCAN_BATCH_LINES", 500, 1);
+const batchBytes = () => envNum("AGENTGLASS_SCAN_BATCH_BYTES", 1024 * 1024, 64 * 1024);
 /**
  * A single line larger than this is not parsed on the loop.
  *
@@ -93,7 +109,8 @@ const batchBytes = () => Math.max(64 * 1024, Number(process.env.AGENTGLASS_SCAN_
  * allows. The 64KB floor keeps a misconfigured value from skipping ordinary
  * records.
  */
-const maxLineBytes = () => Math.max(64 * 1024, Number(process.env.AGENTGLASS_SCAN_MAX_LINE_BYTES || 16 * 1024 * 1024));
+// Same NaN guard as the batch knobs above — see envNum.
+const maxLineBytes = () => envNum("AGENTGLASS_SCAN_MAX_LINE_BYTES", 16 * 1024 * 1024, 64 * 1024);
 /** When a human is typing, step a few ms further back between batches — clear
  *  air for the PTY on top of the macrotask yield every batch already takes. */
 const YIELD_HOT_MS = 4;

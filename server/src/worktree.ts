@@ -65,7 +65,12 @@ export function worktreeParent(dir: string): string | null {
   // other common worktree layout is a bare clone plus sibling checkouts
   // (`~/code/orbit/.bare/worktrees/main`), and hardcoding `.git` left exactly
   // those users with the unfolded picker this change exists to fix.
-  const at = gitdir.lastIndexOf("/worktrees/");
+  // Searched on a slash-normalised copy: `resolve()` yields backslashes on
+  // Windows, so looking for the literal "/worktrees/" never matched there and
+  // every linked worktree was reported as having no parent — which unfolded the
+  // whole picker, the bug this function exists to prevent. The replace is 1:1 so
+  // the index is still valid against the original.
+  const at = gitdir.replace(/\\/g, "/").lastIndexOf("/worktrees/");
   if (at === -1) return null;
   // The project is the directory holding the git dir: `<p>/.git` → `<p>`, and
   // `<p>/.bare` → `<p>`. A submodule (`<p>/.git/modules/<name>`) never reaches

@@ -101,8 +101,15 @@ export async function withSpawnSlot<T>(fn: () => Promise<T>): Promise<T> {
     inflight--;
     waiting.shift()?.();
   };
+  // Deliberately NOT unref'd — same reasoning as gate.ts's arm().
+  //
+  // When the pool is full of stuck work, this timer is the ONLY thing that can
+  // wake a queued waiter, so anything awaiting a slot is awaiting this callback.
+  // Under `bun test` on Windows (1.3.14) an unref'd timer never fires while it
+  // is the sole pending work, so the await deadlocked and hung the run. It is
+  // cleared in the `finally` below on every normal path, so it cannot outlive
+  // the call and hold the process open.
   const guard = setTimeout(release, guardMs());
-  guard.unref?.();
   try {
     return await fn();
   } finally {

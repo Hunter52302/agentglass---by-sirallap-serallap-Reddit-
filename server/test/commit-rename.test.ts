@@ -1,12 +1,24 @@
 // Committing a renamed file used to record only the new path's addition, not the
 // old path's deletion: HEAD ended up with both files plus an orphaned staged
 // deletion. A rename must land whole.
-import { describe, expect, it, beforeEach, afterEach } from "bun:test";
+import { describe, expect, it, beforeEach, afterEach, afterAll } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { commit } from "../src/git.ts";
+
+// `bun test` shares ONE process across every file, so a scope this file sets
+// stays set for every suite that runs after it — their rows then fall outside
+// the leaked scope and vanish from every scoped query, which reads as a
+// product bug in whichever file happened to be next. Captured at module load
+// (before anything below assigns it) and put back when this file is done.
+const __priorScope = process.env.AGENTGLASS_ROOT;
+afterAll(() => {
+  if (__priorScope === undefined) delete process.env.AGENTGLASS_ROOT;
+  else process.env.AGENTGLASS_ROOT = __priorScope;
+});
+
 
 let dir = "";
 const git = (...a: string[]) => spawnSync("git", ["-C", dir, ...a], { encoding: "utf8" });

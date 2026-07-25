@@ -1,9 +1,21 @@
-import { describe, expect, it, beforeEach, afterEach } from "bun:test";
+import { describe, expect, it, beforeEach, afterEach, afterAll } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { conflictBlocks, resolveBlocks } from "../src/gitwork.ts";
+
+// `bun test` shares ONE process across every file, so a scope this file sets
+// stays set for every suite that runs after it — their rows then fall outside
+// the leaked scope and vanish from every scoped query, which reads as a
+// product bug in whichever file happened to be next. Captured at module load
+// (before anything below assigns it) and put back when this file is done.
+const __priorScope = process.env.AGENTGLASS_ROOT;
+afterAll(() => {
+  if (__priorScope === undefined) delete process.env.AGENTGLASS_ROOT;
+  else process.env.AGENTGLASS_ROOT = __priorScope;
+});
+
 
 /**
  * Resolving one conflict at a time.
