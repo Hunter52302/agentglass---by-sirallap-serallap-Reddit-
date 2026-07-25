@@ -16,6 +16,7 @@ import { insertEnvEvent, pruneEnvEvents, pruneAgentPids } from "./store";
 import { db } from "../db.ts";
 import { workspaceRoot } from "../config.ts";
 import { readSettings, writeSettings, resolveFlag } from "./settings";
+import { evaluateFileObservation, reloadRedlines } from "./redlines";
 import type { ArgusEvent, EnvEvent, EnvFidelity, EnvTier } from "./types";
 
 const flag = (name: string, dflt: boolean) => {
@@ -152,7 +153,10 @@ export function isArgusWorkspacePath(target: string, root = workspaceRoot()): bo
 }
 
 function startFsWatcher(dir: string): void {
+  // ${WATCH_DIR} rules are rebound whenever the operator moves the lens.
+  reloadRedlines(dir);
   fsHandle = startWatcher(dir, (change) => {
+    const redline = evaluateFileObservation(change);
     sink?.({
       ts: change.ts,
       agent_id: null,
@@ -160,12 +164,17 @@ function startFsWatcher(dir: string): void {
       surface: "file",
       action: change.action,
       target: change.path,
-      status: "ok",
+      status: redline ? "redline" : "ok",
       payload: {
         path: change.path,
         diff: change.diff,
         fidelity: "fs_observed",
         scope: isArgusWorkspacePath(dir) ? "workspace" : "operator_expanded",
+        redline: redline?.rule ?? null,
+        containment_available: redline?.containment_available ?? false,
+        containment_note: redline && !redline.containment_available
+          ? "filesystem watcher identified the path but not the writer pid"
+          : null,
       },
     });
   }, { exclude: selfPaths() });
@@ -256,6 +265,8 @@ export function startEnvTier({ onEvent, fsDir, retentionDays = 0 }: StartEnvTier
       status.file = { enabled: false, available: false, dir: status.file.dir };
       writeSettings({ fs_enabled: false });
     }
+  } else {
+    reloadRedlines(status.file.dir);
   }
 
   let pruneTimer: ReturnType<typeof setInterval> | null = null;
