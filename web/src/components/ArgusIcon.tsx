@@ -1,4 +1,4 @@
-// Serrallapa for Argus — the Argus glyph.
+// Glasses for Argus — the Argus glyph.
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md.
 //

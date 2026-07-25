@@ -1,4 +1,4 @@
-// Serrallapa for Argus — the node map.
+// Glasses for Argus — the node map.
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md at the repo root.
 //

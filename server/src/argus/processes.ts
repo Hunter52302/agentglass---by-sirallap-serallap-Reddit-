@@ -1,4 +1,4 @@
-// Serrallapa for Argus — passive LLM/agent process discovery.
+// Glasses for Argus — passive LLM/agent process discovery.
 //
 // Origin: Argus src/processes.js — MIT © 2026 Zac Rieger.
 // Ported to TypeScript; detection logic and signatures unchanged so this file

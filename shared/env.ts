@@ -1,4 +1,4 @@
-// Serrallapa for Argus — environment-tier types shared by server and UI.
+// Glasses for Argus — environment-tier types shared by server and UI.
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md.
 //

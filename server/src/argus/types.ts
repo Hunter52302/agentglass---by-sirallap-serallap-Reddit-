@@ -1,4 +1,4 @@
-// Serrallapa for Argus — server-side environment tier types.
+// Glasses for Argus — server-side environment tier types.
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md.
 //

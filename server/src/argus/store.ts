@@ -1,4 +1,4 @@
-// Serrallapa for Argus — environment-tier persistence.
+// Glasses for Argus — environment-tier persistence.
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md.
 //

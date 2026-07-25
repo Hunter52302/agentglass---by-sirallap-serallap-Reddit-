@@ -1,4 +1,4 @@
-// Serrallapa for Argus — the filesystem map.
+// Glasses for Argus — the filesystem map.
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md at the repo root.
 //
@@ -319,7 +319,7 @@ export function MapView({ active }: { active: boolean }) {
         title="Map"
         count={map?.total_nodes}
         actions={
-          <span className="flex items-center gap-2">
+          <span className="flex items-center gap-2 max-w-[calc(100vw-140px)] overflow-x-auto agw-noscrollbar">
             <span className="flex items-center gap-0.5 p-0.5 rounded-lg"
               style={{ background: "var(--bg2)", border: "1px solid color-mix(in srgb, var(--border) 45%, transparent)" }}>
               {(["nodes", "tree"] as MapMode[]).map((m) => (
@@ -360,7 +360,7 @@ export function MapView({ active }: { active: boolean }) {
               <span className="w-1.5 h-1.5 rounded-full" style={{ background: following ? "var(--success)" : "var(--text4)" }} />
               {following ? "Following live" : "Live paused"}
             </button>
-            <span className="text-[10px]" style={{ color: "var(--text4)" }}>
+            <span className="text-[10px] whitespace-nowrap" style={{ color: "var(--text4)" }}>
               {map?.fs_tier_enabled ? "both layers" : "labeled layer only"}
             </span>
           </span>
@@ -429,7 +429,7 @@ export function MapView({ active }: { active: boolean }) {
         </div>
 
         {/* side rail: who is where, and what the colours mean */}
-        <div className="w-[260px] shrink-0 border-l overflow-y-auto p-4 flex flex-col gap-5"
+        <div className="w-[260px] shrink-0 border-l overflow-y-auto p-4 hidden lg:flex flex-col gap-5"
           style={{ borderColor: "color-mix(in srgb, var(--border) 40%, transparent)" }}>
           <div className="flex flex-col gap-2">
             <h3 className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: "var(--text2)" }}>

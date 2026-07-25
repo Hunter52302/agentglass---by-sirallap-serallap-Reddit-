@@ -137,13 +137,11 @@ export function Header({
       style={{ borderBottom: "1px solid color-mix(in srgb, var(--border) 40%, transparent)", background: "color-mix(in srgb, var(--bg2) 94%, var(--bg))", paddingLeft: IS_MAC_DESKTOP ? 76 : undefined }}>
       <div className="flex items-center gap-2.5 shrink-0">
         <motion.span initial={{ rotate: -20, opacity: 0 }} animate={{ rotate: 0, opacity: 1 }} transition={{ type: "spring", stiffness: 200 }} className="flex pointer-events-none">
-          <Logo size={26} title="Serrallapa for Argus" />
+          <Logo size={26} title="agentglass" />
         </motion.span>
-        {/* Serrallapa for Argus — the user's wordmark. Argus remains the
-            environment tier; internal package and file names stay compatible. */}
         <div className="leading-none pointer-events-none">
           <div className="text-[16px] font-bold tracking-tight" style={{ color: "var(--text)" }}>
-            <span style={{ color: "var(--primary)" }}>Serrallapa</span> for Argus
+            agent<span style={{ color: "var(--primary)" }}>glass</span>
           </div>
         </div>
         {/* The project defines what every other number on screen means, so it

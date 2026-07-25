@@ -1,4 +1,4 @@
-// Serrallapa for Argus — path normalization.
+// Glasses for Argus — path normalization.
 //
 // Origin: Argus src/paths.js (§12.2) — MIT © 2026 Zac Rieger.
 // Ported verbatim to TypeScript; logic unchanged.

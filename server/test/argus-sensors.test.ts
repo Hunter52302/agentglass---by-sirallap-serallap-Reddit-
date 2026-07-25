@@ -1,4 +1,4 @@
-// Serrallapa for Argus — sensor classification and parsing.
+// Glasses for Argus — sensor classification and parsing.
 //
 // Pure functions only: no process table, no sockets, no filesystem. These are
 // the parts that decide what something IS, and they are exactly the parts a

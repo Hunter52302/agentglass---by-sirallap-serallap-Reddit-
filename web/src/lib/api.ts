@@ -216,7 +216,7 @@ const realApi = {
   changes: (limit = 200) => get<{ changes: FileChange[] }>(`/changes?limit=${limit}`),
   session: (id: string) => get<SessionDetail>(`/session?id=${encodeURIComponent(id)}`),
   insights: () => get<{ insights: Insight[] }>(`/insights`),
-  // Serrallapa for Argus — the environment tier. Separate endpoints because this
+  // Glasses for Argus — the environment tier. Separate endpoints because this
   // is a separate table: observations about the machine, not agent telemetry.
   envStatus: () => get<EnvTierStatus>(`/env/status`),
   envSummary: () => get<EnvSummary>(`/env/summary`),

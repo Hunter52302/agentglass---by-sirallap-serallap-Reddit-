@@ -1,4 +1,4 @@
-// Serrallapa for Argus — user-defined server-side redline policy.
+// Glasses for Argus — user-defined server-side redline policy.
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md.
 //

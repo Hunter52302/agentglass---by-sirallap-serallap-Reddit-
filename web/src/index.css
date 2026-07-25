@@ -78,18 +78,60 @@
     background-size: 24px 24px;
     border: 1px dashed color-mix(in srgb, var(--primary) 35%, transparent);
   }
-  .cockpit-grid-editing .cockpit-widget {
-    animation: cockpit-jiggle 1.8s ease-in-out infinite alternate;
+  .cockpit-selection-border {
+    position: absolute;
+    inset: 0;
+    z-index: 25;
+    border: 2px solid #1da1f2;
+    border-radius: inherit;
+    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.28);
   }
-  .cockpit-grid-editing .cockpit-widget:nth-child(even) {
-    animation-delay: -0.8s;
+  .cockpit-resize-point {
+    position: absolute;
+    z-index: 28;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #1da1f2;
+    border: 1px solid rgba(255, 255, 255, 0.72);
+    box-shadow: 0 1px 5px rgba(0, 0, 0, 0.55);
+    touch-action: none;
   }
-  .cockpit-grid-editing .cockpit-widget button {
+  .cockpit-drag-label {
+    position: absolute;
+    z-index: 27;
+    top: 5px;
+    left: 50%;
+    transform: translateX(-50%);
+    max-width: calc(100% - 82px);
+    padding: 4px 9px;
+    border-radius: 7px;
+    cursor: move;
+    touch-action: none;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
     font-size: 10px;
+    color: white;
+    background: rgba(20, 24, 32, 0.92);
+    border: 1px solid rgba(29, 161, 242, 0.7);
   }
-  @keyframes cockpit-jiggle {
-    from { transform: rotate(-0.12deg); }
-    to { transform: rotate(0.12deg); }
+  .cockpit-card-actions {
+    position: absolute;
+    z-index: 28;
+    top: 5px;
+    right: 6px;
+    display: flex;
+    gap: 3px;
+  }
+  .cockpit-card-actions button {
+    width: 23px;
+    height: 23px;
+    border-radius: 6px;
+    font-size: 12px;
+    color: var(--text2);
+    background: color-mix(in srgb, var(--bg) 92%, transparent);
+    border: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
   }
   @media (max-width: 1279px) {
     .cockpit-grid {
@@ -97,7 +139,7 @@
       flex-direction: column;
     }
     .cockpit-widget {
-      height: 360px;
+      height: var(--cockpit-mobile-height, 360px);
       flex: none;
     }
   }

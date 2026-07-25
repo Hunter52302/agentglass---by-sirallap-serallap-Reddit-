@@ -1,4 +1,4 @@
-// Serrallapa for Argus — the Environment view.
+// Glasses for Argus — the Environment view.
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md at the repo root.
 //

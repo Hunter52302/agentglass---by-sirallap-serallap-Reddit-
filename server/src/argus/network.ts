@@ -1,4 +1,4 @@
-// Serrallapa for Argus — outbound connection (network) discovery.
+// Glasses for Argus — outbound connection (network) discovery.
 //
 // Origin: Argus src/network.js — MIT © 2026 Zac Rieger.
 // Ported to TypeScript; scanning and classification unchanged.

@@ -1,4 +1,4 @@
-// Serrallapa for Argus — Argus's own cockpit.
+// Glasses for Argus — Argus's own cockpit.
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md at the repo root.
 //
@@ -271,8 +271,8 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
       <div className="fixed inset-0 z-[60] flex flex-col" style={{ background: "var(--bg)" }}>
         {/* ── header: the lens, and the controls that move it ── */}
         <div
-          className="flex items-center gap-3 px-5 shrink-0 border-b flex-wrap"
-          style={{ height: 52, borderColor: "color-mix(in srgb, var(--border) 40%, transparent)" }}
+          className="flex items-center gap-x-3 gap-y-2 px-3 sm:px-5 py-2 shrink-0 border-b flex-wrap"
+          style={{ minHeight: 52, borderColor: "color-mix(in srgb, var(--border) 40%, transparent)" }}
         >
           <span className="text-[15px] font-bold tracking-tight shrink-0" style={{ color: "var(--text)" }}>
             Argus
@@ -281,7 +281,7 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
             what the machine shows
           </span>
 
-          <div className="flex items-center gap-2 ml-4 flex-wrap">
+          <div className="flex items-center gap-2 sm:ml-4 flex-wrap">
             <Toggle
               on={!!status?.process.enabled}
               label="processes"
@@ -302,7 +302,7 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
             />
           </div>
 
-          <div className="flex items-center gap-1.5 ml-auto">
+          <div className="flex items-center gap-1.5 w-full xl:w-auto xl:ml-auto min-w-0 overflow-x-auto pb-0.5 xl:pb-0">
             <span className="flex items-center gap-0.5 p-0.5 rounded-lg"
               style={{ background: "var(--bg2)", border: "1px solid color-mix(in srgb, var(--border) 45%, transparent)" }}>
               {(["activity", "map"] as const).map((item) => (
@@ -317,26 +317,26 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
               ))}
             </span>
             <span className="text-[10px] shrink-0" style={{ color: "var(--text4)" }}>watching</span>
-            <div className="relative" style={{ width: "min(300px, 32vw)" }}>
-            <PathAutocomplete
-              inputRef={dirRef}
-              value={dirDraft}
-              onChange={setDirDraft}
-              onSubmit={() => void applyDir()}
-              placeholder={status?.file.dir || "/Users/you/project"}
-            />
-            {watchError && <div className="absolute mt-1 text-[9px]" style={{ color: "var(--error)" }}>{watchError}</div>}
+            <div className="relative flex-1 min-w-[180px] xl:w-[300px] xl:flex-none">
+              <PathAutocomplete
+                inputRef={dirRef}
+                value={dirDraft}
+                onChange={setDirDraft}
+                onSubmit={() => void applyDir()}
+                placeholder={status?.file.dir || "/Users/you/project"}
+              />
+              {watchError && <div className="absolute mt-1 text-[9px]" style={{ color: "var(--error)" }}>{watchError}</div>}
             </div>
             <button
               onClick={applyDir}
-              className="px-2 py-1 rounded-lg text-[11px] transition-opacity hover:opacity-80"
+              className="px-2 py-1 rounded-lg text-[11px] transition-opacity hover:opacity-80 shrink-0"
               style={{ color: "var(--primary-hover)", background: "color-mix(in srgb, var(--primary) 14%, transparent)" }}
             >
               move lens
             </button>
             <button
               onClick={onClose}
-              className="px-2 py-1 rounded-lg text-[11px] ml-2 transition-opacity hover:opacity-80"
+              className="px-2 py-1 rounded-lg text-[11px] ml-1 transition-opacity hover:opacity-80 shrink-0"
               style={{ color: "var(--text3)" }}
               title="Close (Esc)"
             >

@@ -1,4 +1,4 @@
-// Serrallapa for Argus — agent runtime integrity, provenance, and intervention.
+// Glasses for Argus — agent runtime integrity, provenance, and intervention.
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md for provenance.
 //
