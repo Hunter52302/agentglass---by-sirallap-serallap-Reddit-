@@ -13,6 +13,7 @@ import type {
   GitBranch, GitCommit, GitStash, GitGraphLine, GitWorktree, DockerOverview, DockerStat, DockerActionResult,
 } from "../../../shared/types.ts";
 import { providerOf } from "./format.ts";
+import { ctxLimitOf } from "./contextWindow.ts";
 
 export const IS_DEMO = import.meta.env.VITE_DEMO === "1";
 
@@ -23,14 +24,14 @@ const uid = () => Array.from({ length: 8 }, () => "0123456789abcdef"[rint(0, 15)
 
 // A deliberately mixed fleet so the demo shows off multi-provider support:
 // Anthropic + OpenAI + Google, all auto-detected from the model name.
-const MODELS = ["claude-opus-4-8", "claude-sonnet-5", "gpt-5", "gpt-5-mini", "gemini-3-flash"];
+const MODELS = ["claude-fable-5", "claude-opus-5", "claude-sonnet-5", "gpt-5", "gpt-5-mini", "gemini-3-flash"];
 interface Sess { app: string; sid: string; model: string }
 // Fictional app suite for a made-up online store.
 const SESSIONS: Sess[] = [
-  { app: "shop-web", sid: "7a3f21c9-demo", model: "claude-opus-4-8" },
+  { app: "shop-web", sid: "7a3f21c9-demo", model: "claude-opus-5" },
   { app: "shop-web", sid: "e2b8d640-demo", model: "gpt-5" },
   { app: "shop-api", sid: "3c9a1f52-demo", model: "claude-sonnet-5" },
-  { app: "agentglass", sid: "b7e40a18-demo", model: "claude-opus-4-8" },
+  { app: "agentglass", sid: "b7e40a18-demo", model: "claude-opus-5" },
   { app: "payments-svc", sid: "5f6d2e93-demo", model: "gemini-3-flash" },
   { app: "inventory-svc", sid: "8a1c7b04-demo", model: "gpt-5-mini" },
   { app: "sandbox", sid: "d4e903a7-demo", model: "gpt-5" },
@@ -112,7 +113,7 @@ function nextEvent(): WatchEvent {
     // Each turn re-sends the growing conversation (mostly as cache reads), so
     // per-session context creeps up between turns and drops on "compaction" —
     // that drift toward the radar's edge and snap back is the point of it.
-    const limit = s.model.includes("gemini") ? 1_000_000 : s.model.includes("gpt-5") ? 400_000 : s.model.includes("gpt") ? 128_000 : 200_000;
+    const limit = ctxLimitOf(s.model);
     let ctx = demoCtx.get(s.sid) ?? rint(8_000, limit * 0.5);
     ctx += rint(3_000, 14_000);
     if (ctx > limit * 0.92) ctx = rint(limit * 0.2, limit * 0.35); // compacted

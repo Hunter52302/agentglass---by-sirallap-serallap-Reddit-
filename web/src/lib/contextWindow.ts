@@ -25,12 +25,16 @@ function suffixWindow(m: string): number | null {
   return hit[2] === "m" ? n * 1_000_000 : n * 1_000;
 }
 
+/** Claude families whose published default context window is 1M. */
+const CLAUDE_1M = /fable|mythos|opus-5|sonnet-5|opus-4-[678]|sonnet-4-6/;
+
 /** Ceiling by model family. Only consulted when the id doesn't say outright. */
 function familyWindow(m: string): number {
   if (m.includes("gemini")) return 1_000_000;
   if (m.includes("gpt-5")) return 400_000;
   if (m.includes("gpt") || /\bo[134]\b/.test(m)) return 128_000;
-  return 200_000;  // every current Claude model, absent a suffix
+  if (CLAUDE_1M.test(m)) return 1_000_000;
+  return 200_000;
 }
 
 /**
