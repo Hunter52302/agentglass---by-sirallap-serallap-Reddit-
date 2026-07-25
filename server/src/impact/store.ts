@@ -75,6 +75,8 @@ export function migrateImpact(db: Database): void {
       weekly_budget_ml REAL,
       monthly_budget_ml REAL,
       window_budget_ml REAL,
+      custom_budget_ml REAL,
+      custom_period_ms INTEGER,
       updated_at INTEGER NOT NULL
     );
 
@@ -144,6 +146,8 @@ export function migrateImpact(db: Database): void {
     CREATE INDEX IF NOT EXISTS idx_event_impacts_agent_ts ON event_impacts(agent_id, timestamp);
     CREATE INDEX IF NOT EXISTS idx_event_impacts_request_ts ON event_impacts(request_group_id, timestamp);
   `);
+  try { db.exec("ALTER TABLE impact_settings ADD COLUMN custom_budget_ml REAL"); } catch { /* already present */ }
+  try { db.exec("ALTER TABLE impact_settings ADD COLUMN custom_period_ms INTEGER"); } catch { /* already present */ }
   seedProfiles(db, ACTIVE_IMPACT_PROFILES);
   seedFactors(db, REGIONAL_WATER_FACTORS);
   const s = DEFAULT_IMPACT_SETTINGS;
@@ -151,13 +155,15 @@ export function migrateImpact(db: Database): void {
     INSERT OR IGNORE INTO impact_settings (
       id, display_mode, water_unit, boundary, estimate_display, profile_behavior,
       unavailable_behavior, proxy_profile_id, regional_factor_id, lifecycle_enabled,
-      daily_budget_ml, weekly_budget_ml, monthly_budget_ml, window_budget_ml, updated_at
-    ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      daily_budget_ml, weekly_budget_ml, monthly_budget_ml, window_budget_ml,
+      custom_budget_ml, custom_period_ms, updated_at
+    ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     s.display_mode, s.water_unit, s.boundary, s.estimate_display, s.profile_behavior,
     s.unavailable_behavior, s.proxy_profile_id, s.regional_factor_id,
     Number(s.lifecycle_enabled), s.daily_budget_ml, s.weekly_budget_ml,
-    s.monthly_budget_ml, s.window_budget_ml, Date.now(),
+    s.monthly_budget_ml, s.window_budget_ml, s.custom_budget_ml,
+    s.custom_period_ms, Date.now(),
   );
 }
 
@@ -230,6 +236,8 @@ export function getImpactSettings(db: Database): ImpactSettings {
     weekly_budget_ml: nullableBudget(row.weekly_budget_ml),
     monthly_budget_ml: nullableBudget(row.monthly_budget_ml),
     window_budget_ml: nullableBudget(row.window_budget_ml),
+    custom_budget_ml: nullableBudget(row.custom_budget_ml),
+    custom_period_ms: nullableBudget(row.custom_period_ms),
   };
 }
 
@@ -269,7 +277,10 @@ export function updateImpactSettings(db: Database, patch: Partial<ImpactSettings
     next.regional_factor_id = patch.regional_factor_id;
   }
   if (patch.lifecycle_enabled !== undefined) next.lifecycle_enabled = !!patch.lifecycle_enabled;
-  for (const key of ["daily_budget_ml", "weekly_budget_ml", "monthly_budget_ml", "window_budget_ml"] as const) {
+  for (const key of [
+    "daily_budget_ml", "weekly_budget_ml", "monthly_budget_ml", "window_budget_ml",
+    "custom_budget_ml", "custom_period_ms",
+  ] as const) {
     if (patch[key] !== undefined) {
       const v = patch[key];
       if (v !== null && (typeof v !== "number" || !Number.isFinite(v) || v < 0)) throw new Error(`invalid ${key}`);
@@ -281,13 +292,15 @@ export function updateImpactSettings(db: Database, patch: Partial<ImpactSettings
       display_mode = ?, water_unit = ?, boundary = ?, estimate_display = ?,
       profile_behavior = ?, unavailable_behavior = ?, proxy_profile_id = ?,
       regional_factor_id = ?, lifecycle_enabled = ?, daily_budget_ml = ?,
-      weekly_budget_ml = ?, monthly_budget_ml = ?, window_budget_ml = ?, updated_at = ?
+      weekly_budget_ml = ?, monthly_budget_ml = ?, window_budget_ml = ?,
+      custom_budget_ml = ?, custom_period_ms = ?, updated_at = ?
     WHERE id = 1
   `).run(
     next.display_mode, next.water_unit, next.boundary, next.estimate_display,
     next.profile_behavior, next.unavailable_behavior, next.proxy_profile_id,
     next.regional_factor_id, Number(next.lifecycle_enabled), next.daily_budget_ml,
-    next.weekly_budget_ml, next.monthly_budget_ml, next.window_budget_ml, Date.now(),
+    next.weekly_budget_ml, next.monthly_budget_ml, next.window_budget_ml,
+    next.custom_budget_ml, next.custom_period_ms, Date.now(),
   );
   return next;
 }
@@ -309,6 +322,15 @@ export function listImpactProfiles(db: Database): ImpactProfile[] {
   }));
 }
 
+export function listRegionalFactors(db: Database): RegionalWaterFactor[] {
+  return db.query<any, []>("SELECT * FROM impact_regional_factors ORDER BY factor_id, version").all().map((row) => ({
+    factor_id: row.factor_id, version: row.version, label: row.label, region: row.region,
+    water_type: row.water_type, liters_per_kwh: row.liters_per_kwh,
+    source_title: row.source_title, source_url: row.source_url,
+    source_date: row.source_date, notes: row.notes,
+  }));
+}
+
 export interface ImpactQueryFilters {
   provider?: string | null;
   model?: string | null;
@@ -324,10 +346,15 @@ interface AggregateRow {
   session_id: string | null;
   agent_id: string | null;
   request_group_id: string | null;
+  profile_id: string | null;
+  profile_version: string | null;
+  regional_factor_id: string | null;
   scopes_included: string | null;
   scope_unknown: number | null;
   water_type: string | null;
   statistic: string | null;
+  method: ImpactEstimate["method"];
+  confidence: ImpactEstimate["confidence"];
   rows: number;
   unknown_rows: number;
   energy_low: number | null;
@@ -394,6 +421,7 @@ function emptyTotal(): ImpactTotal {
     energy_wh: empty(), water_consumption_ml: empty(), water_withdrawal_ml: empty(),
     water_s1_ml: empty(), water_s2_ml: empty(), water_s3_ml: empty(),
     known_rows: 0, unknown_rows: 0, incomplete: false,
+    boundary_label: "water unavailable", source_refs: [],
   };
 }
 
@@ -405,6 +433,14 @@ function rowTotal(row: AggregateRow, settings: ImpactSettings): ImpactTotal {
   const total = emptyTotal();
   const rows = Number(row.rows ?? 0);
   const scopes = parseScopes(row);
+  total.source_refs = [{
+    profile_id: row.profile_id,
+    profile_version: row.profile_version,
+    regional_factor_id: row.regional_factor_id,
+    method: row.method,
+    confidence: row.confidence,
+    statistic: row.statistic as ImpactEstimate["statistic"],
+  }];
   total.energy_wh = rangeFrom(row, "energy", Number(row.energy_central_n ?? 0));
   total.water_s1_ml = rangeFrom(row, "s1", Number(row.s1_central_n ?? 0));
   total.water_s2_ml = rangeFrom(row, "s2", Number(row.s2_central_n ?? 0));
@@ -431,6 +467,15 @@ function rowTotal(row: AggregateRow, settings: ImpactSettings): ImpactTotal {
   );
   total.unknown_rows = Math.max(Number(row.unknown_rows ?? 0), rows - total.known_rows);
   total.incomplete = total.unknown_rows > 0;
+  total.boundary_label = settings.boundary === "direct_s1"
+    ? "S1"
+    : settings.boundary === "operational_s1_s2"
+      ? "S1+S2"
+      : settings.boundary === "lifecycle_s1_s2_s3"
+        ? "S1+S2+S3"
+        : row.scope_unknown
+          ? "scope unknown"
+          : scopes.length ? scopes.map((scope) => `S${scope}`).join("+") : "water unavailable";
   return total;
 }
 
@@ -453,6 +498,15 @@ function combineTotals(a: ImpactTotal, b: ImpactTotal): ImpactTotal {
     known_rows: a.known_rows + b.known_rows,
     unknown_rows: a.unknown_rows + b.unknown_rows,
     incomplete: a.incomplete || b.incomplete,
+    boundary_label:
+      a.boundary_label === "water unavailable" ? b.boundary_label
+      : b.boundary_label === "water unavailable" ? a.boundary_label
+      : a.boundary_label === b.boundary_label ? a.boundary_label : "mixed boundaries",
+    source_refs: [...new Map(
+      [...a.source_refs, ...b.source_refs].map((ref) => [
+        `${ref.profile_id}@${ref.profile_version}|${ref.regional_factor_id}|${ref.method}|${ref.confidence}|${ref.statistic}`, ref,
+      ]),
+    ).values()],
   };
 }
 
@@ -473,6 +527,7 @@ function combineRows(rows: AggregateRow[], settings: ImpactSettings): ImpactTota
     total.water_consumption_ml = { low: null, central: null, high: null };
     total.water_withdrawal_ml = { low: null, central: null, high: null };
     total.incomplete = true;
+    total.boundary_label = "mixed boundaries";
   }
   return total;
 }
@@ -504,6 +559,8 @@ function aggregateQuery(
   return db.query<AggregateRow, any[]>(`
     SELECT ${keySql} AS key, ${labelSql} AS label,
       i.provider, i.model_name, i.session_id, i.agent_id, i.request_group_id, i.statistic,
+      i.method, i.confidence,
+      i.profile_id, i.profile_version, i.regional_factor_id,
       COALESCE(
         p.scopes_included,
         CASE
@@ -530,7 +587,8 @@ function aggregateQuery(
       ON p.profile_id = i.profile_id AND p.profile_version = i.profile_version
     WHERE i.timestamp >= ?${f.where}
     GROUP BY key, label, i.provider, i.model_name, i.session_id, i.agent_id,
-      i.request_group_id, i.statistic, scopes_included, scope_unknown, water_type
+      i.request_group_id, i.statistic, i.method, i.confidence, i.profile_id, i.profile_version,
+      i.regional_factor_id, scopes_included, scope_unknown, water_type
   `).all(since, ...f.args);
 }
 
@@ -590,15 +648,17 @@ export function getImpactSummary(
     ["weekly", settings.weekly_budget_ml, 7 * 86_400_000],
     ["monthly", settings.monthly_budget_ml, 30 * 86_400_000],
     ["window", settings.window_budget_ml, windowMs],
+    ["custom", settings.custom_budget_ml, settings.custom_period_ms ?? 0],
   ];
   for (const [period, budget, duration] of periods) {
-    if (budget === null) continue;
+    if (budget === null || duration <= 0) continue;
     const used = combineRows(aggregateQuery(db, Date.now() - duration, filters, scope, "'all'", "'all'"), settings);
     budgets.push(budgetState(period, budget, used.water_consumption_ml, used.incomplete));
   }
   return {
     totals, by_model, by_provider, by_session, by_agent, by_request_group,
-    timeline, profiles: listImpactProfiles(db), settings, budgets, window_ms: windowMs,
+    timeline, profiles: listImpactProfiles(db), factors: listRegionalFactors(db),
+    settings, budgets, window_ms: windowMs,
   };
 }
 

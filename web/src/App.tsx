@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { WatchEvent, SessionRollup } from "../../shared/types.ts";
 import { useLive } from "./lib/useLive.ts";
 import { useStats } from "./lib/useStats.ts";
+import { useImpact } from "./lib/useImpact.ts";
 import { deriveAgents, deriveAlerts, buildTitles } from "./lib/derive.ts";
 import { providerOf } from "./lib/format.ts";
 import { api, IS_DEMO } from "./lib/api.ts";
@@ -22,7 +23,7 @@ import { ArgusCockpit } from "./components/ArgusCockpit.tsx";
 import { Alerts } from "./components/Alerts.tsx";
 import { Fleet } from "./components/Fleet.tsx";
 import { Feed } from "./components/Feed.tsx";
-import { CostByModel } from "./components/CostByModel.tsx";
+import { ImpactByModel } from "./components/ImpactByModel.tsx";
 import { Latency } from "./components/Latency.tsx";
 import { Sessions } from "./components/Sessions.tsx";
 import { MissionTimeline } from "./components/MissionTimeline.tsx";
@@ -179,6 +180,7 @@ export default function App() {
   // used to refetch /stats on every single event (a per-event server query +
   // full chart re-render). The 4s interval is plenty for a summary.
   const { stats } = useStats(windowMs, undefined, filter.provider);
+  const { impact, reload: reloadImpact } = useImpact(windowMs, filter.provider);
 
   useEffect(() => {
     applyTheme(theme);
@@ -518,14 +520,14 @@ export default function App() {
 
       <main className="flex-1 min-h-0 p-3 flex flex-col gap-3 overflow-auto tall:overflow-hidden">
         <div className="shrink-0">
-          <Kpis stats={stats} agents={agents} startedAt={startedAt} epm={epm} />
+          <Kpis stats={stats} impact={impact} agents={agents} startedAt={startedAt} epm={epm} />
         </div>
 
         {/* Cockpit — fills the viewport on a tall screen; on short laptops it
             keeps readable panel heights and the page scrolls instead. */}
         <div className="shrink-0 min-h-0 tall:flex-1 grid grid-cols-1 xl:grid-cols-12 gap-3">
           <div className="xl:col-span-3 min-w-0 min-h-0 h-[420px] xl:h-[520px] tall:h-auto">
-            <Fleet agents={agents} activeApp={filter.app} onSelect={(a) => setSessionView({ id: a.session_id, app: a.source_app })} />
+            <Fleet impact={impact} agents={agents} activeApp={filter.app} onSelect={(a) => setSessionView({ id: a.session_id, app: a.source_app })} />
           </div>
 
           {/* Phones: auto-height rows with fixed chart/feed heights — the
@@ -553,7 +555,7 @@ export default function App() {
 
         {/* Money row — pinned */}
         <div className="shrink-0 grid grid-cols-1 xl:grid-cols-3 gap-3 h-auto xl:h-[196px]">
-          <CostByModel stats={stats} />
+          <ImpactByModel stats={stats} impact={impact} />
           <Latency stats={stats} />
           <Sessions provider={filter.provider} />
         </div>
@@ -583,6 +585,8 @@ export default function App() {
         onZoom={zoom}
         onOpenStats={() => setStatsOpen(true)}
         onOpenHelp={() => setHelpOpen(true)}
+        impact={impact}
+        onImpactChange={reloadImpact}
       />
       <SessionModal
         sessionId={sessionView?.id ?? null}

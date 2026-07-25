@@ -107,6 +107,15 @@ describe("impact aggregation", () => {
     expect(budget.remaining.low).toBeNull();
   });
 
+  test("custom budget uses its user-selected duration", () => {
+    const db = database();
+    insert(db, 1, "gemini-2.5-pro");
+    updateImpactSettings(db, { custom_budget_ml: 50, custom_period_ms: 2 * 86_400_000 });
+    const budget = getImpactSummary(db, 3_600_000, {}, noScope).budgets.find((row) => row.period === "custom")!;
+    expect(budget.budget_ml).toBe(50);
+    expect(budget.used.central).toBeCloseTo(0.26);
+  });
+
   test("settings changes do not rewrite historical impact rows", () => {
     const db = database();
     insert(db, 1, "gemini-2.5-pro");

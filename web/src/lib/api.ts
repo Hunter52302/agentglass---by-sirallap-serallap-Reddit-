@@ -480,7 +480,7 @@ const DEMO_IMPACT_SETTINGS: ImpactSettings = {
   unavailable_behavior: "show", proxy_profile_id: null,
   regional_factor_id: "lbnl-us-grid-2023", lifecycle_enabled: false,
   daily_budget_ml: null, weekly_budget_ml: null, monthly_budget_ml: null,
-  window_budget_ml: null,
+  window_budget_ml: null, custom_budget_ml: null, custom_period_ms: null,
 };
 const emptyImpactTotal = () => ({
   energy_wh: { low: null, central: null, high: null },
@@ -490,11 +490,12 @@ const emptyImpactTotal = () => ({
   water_s2_ml: { low: null, central: null, high: null },
   water_s3_ml: { low: null, central: null, high: null },
   known_rows: 0, unknown_rows: 0, incomplete: false,
+  boundary_label: "water unavailable", source_refs: [],
 });
 const demoImpact = (windowMs: number): ImpactSummary => ({
   totals: emptyImpactTotal(), by_model: [], by_provider: [], by_session: [],
   by_agent: [], by_request_group: [], timeline: [], profiles: [],
-  settings: DEMO_IMPACT_SETTINGS, budgets: [], window_ms: windowMs,
+  settings: DEMO_IMPACT_SETTINGS, budgets: [], factors: [], window_ms: windowMs,
 });
 
 const demoApi: typeof realApi = {

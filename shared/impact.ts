@@ -119,6 +119,8 @@ export interface ImpactSettings {
   weekly_budget_ml: number | null;
   monthly_budget_ml: number | null;
   window_budget_ml: number | null;
+  custom_budget_ml: number | null;
+  custom_period_ms: number | null;
 }
 
 export interface ImpactTotal {
@@ -131,6 +133,15 @@ export interface ImpactTotal {
   known_rows: number;
   unknown_rows: number;
   incomplete: boolean;
+  boundary_label: string;
+  source_refs: Array<{
+    profile_id: string | null;
+    profile_version: string | null;
+    regional_factor_id: string | null;
+    method: ImpactMethod;
+    confidence: ImpactEstimate["confidence"];
+    statistic: ImpactStatistic | null;
+  }>;
 }
 
 export interface ImpactBreakdownRow extends ImpactTotal {
@@ -144,7 +155,7 @@ export interface ImpactBreakdownRow extends ImpactTotal {
 }
 
 export interface WaterBudgetState {
-  period: "daily" | "weekly" | "monthly" | "window";
+  period: "daily" | "weekly" | "monthly" | "window" | "custom";
   budget_ml: number;
   used: ImpactRange;
   remaining: ImpactRange;
@@ -160,6 +171,7 @@ export interface ImpactSummary {
   by_request_group: ImpactBreakdownRow[];
   timeline: Array<{ t: number; impact: ImpactTotal }>;
   profiles: ImpactProfile[];
+  factors: RegionalWaterFactor[];
   settings: ImpactSettings;
   budgets: WaterBudgetState[];
   window_ms: number;

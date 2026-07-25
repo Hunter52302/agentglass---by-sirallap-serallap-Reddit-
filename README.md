@@ -39,6 +39,7 @@ gate. No install, no server. *(Everything there is fake; it's a showcase.)*
 - [Control plane — approve / deny remotely](#control-plane--approve--deny-tool-calls-remotely-opt-in)
 - [Any provider — via OpenTelemetry](#any-provider--via-opentelemetry-openai-gemini-bedrock-)
 - [Configuration](#configuration-env) · [API](#api) · [Architecture](#architecture)
+- [Environmental impact methodology](docs/ENVIRONMENTAL-IMPACT.md)
 - [Extending / make it yours](docs/EXTENDING.md)
 - [Roadmap](#roadmap) · [Contributing](#contributing) · [License](#license)
 
@@ -217,6 +218,7 @@ Most agent dashboards show a live event feed and forget everything on refresh. a
 | ▶ **Real terminal** | A true PTY shell (your login shell) per repo/worktree over a WebSocket — persistent sessions, plus a described, ready-to-run list of every Makefile target & package script across the whole project, grouped by folder. |
 | 💬 **Claude chat** | Drive local Claude Code sessions from the browser — model + permission-mode picker, streamed replies, resumable sessions that appear in the fleet. |
 | 💰 **Cost & tokens** | Per-event, per-session, per-model USD from a tunable pricing table (input / output / cache-write / cache-read). |
+| **Environmental impact** | Optional source-aware water and energy estimates beside cost/tokens. Versioned profiles, inline boundaries, unknown-safe display, units, budgets, and provenance. [Methodology and limits](docs/ENVIRONMENTAL-IMPACT.md). |
 | ⏱️ **Tool latency** | `PreToolUse`→`PostToolUse` pairing → real p50 / p95 / max per tool. |
 | 📊 **Persistent analytics** | SQLite-backed. `/stats` over any time window survives reloads and restarts. |
 | 🌐 **Any provider** | Claude Code hooks **plus** an OpenTelemetry OTLP receiver (`gen_ai.*` spans). Provider is auto-detected from the model — then **filter the entire cockpit** (cost, tools, latency, sessions, radar…) by provider. |

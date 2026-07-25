@@ -26,6 +26,8 @@ export const DEFAULT_IMPACT_SETTINGS: ImpactSettings = {
   weekly_budget_ml: null,
   monthly_budget_ml: null,
   window_budget_ml: null,
+  custom_budget_ml: null,
+  custom_period_ms: null,
 };
 
 export interface RuntimeEnergy {
