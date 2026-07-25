@@ -1,4 +1,4 @@
-// Glasses for Argus — the node map.
+// AgentGlass Argus integration — the node map.
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md at the repo root.
 //

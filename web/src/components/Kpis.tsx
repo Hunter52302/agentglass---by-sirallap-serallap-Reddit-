@@ -1,8 +1,10 @@
 import NumberFlow from "@number-flow/react";
 import { motion } from "motion/react";
 import type { StatsSummary } from "../../../shared/types.ts";
+import type { ImpactSummary } from "../../../shared/impact.ts";
 import type { AgentCard } from "../lib/derive.ts";
 import { useTicker, fmtClock } from "../lib/motion.ts";
+import { displayHasWater, formatWaterComponents, formatWaterInline, formatWaterRange } from "../lib/impact.ts";
 import { HealthRing } from "./HealthRing.tsx";
 
 const enter = { initial: { opacity: 0, y: 12 }, animate: { opacity: 1, y: 0 } };
@@ -64,11 +66,13 @@ function StatusCell({ k, v, color }: { k: string; v: number; color: string }) {
 
 export function Kpis({
   stats,
+  impact,
   agents,
   startedAt,
   epm,
 }: {
   stats: StatsSummary | null;
+  impact: ImpactSummary | null;
   agents: AgentCard[];
   startedAt: number;
   epm: number;
@@ -86,6 +90,16 @@ export function Kpis({
   const spark = (stats?.timeline ?? []).slice(-24).map((b) => b.cost_usd);
   const healthLabel = health >= 80 ? "All nominal" : health >= 50 ? "Degraded" : "Critical";
   const healthColor = health >= 80 ? "var(--success)" : health >= 50 ? "var(--warning)" : "var(--error)";
+  const display = impact?.settings.display_mode ?? "cost";
+  const showWater = !!impact && displayHasWater(display)
+    && (impact.settings.unavailable_behavior === "show" || impact.totals.water_consumption_ml.central !== null || display === "water");
+  const primaryTokens = display === "tokens" || display === "tokens_water";
+  const primaryWater = display === "water";
+  const waterText = impact ? formatWaterRange(impact.totals.water_consumption_ml, impact.settings) : "water unknown";
+  const waterInline = impact ? formatWaterInline(impact.totals, impact.settings) : "water unknown";
+  const waterComponents = impact ? formatWaterComponents(impact.totals, impact.settings) : "water unknown";
+  const boundary = impact?.totals.boundary_label ?? "boundary unavailable";
+  const heroLabel = primaryWater ? "Water · this window" : primaryTokens ? "Tokens · this window" : "Spend · this window";
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-[1.5fr_1.1fr_1.4fr] gap-2 h-full">
@@ -94,13 +108,40 @@ export function Kpis({
           number instead of crushing it into a three-line label. */}
       <motion.div {...enter} transition={{ type: "spring", stiffness: 300, damping: 26 }} className="panel flex-row flex-wrap items-center gap-x-4 gap-y-2 px-5 py-3.5">
         <div className="min-w-0 grow">
-          <div className="panel-eyebrow">Spend · this window</div>
-          <div className="text-[32px] font-semibold leading-none tabular-nums" style={{ color: "var(--success)" }}>
-            <NumberFlow value={cost} format={{ style: "currency", currency: "USD", minimumFractionDigits: 2 }} />
-          </div>
+          <div className="panel-eyebrow">{heroLabel}</div>
+          {primaryWater ? (
+            <div className="text-[28px] font-semibold leading-none tabular-nums" style={{ color: "var(--info)" }}>{waterText}</div>
+          ) : primaryTokens ? (
+            <div className="text-[32px] font-semibold leading-none tabular-nums" style={{ color: "var(--info)" }}><NumberFlow value={tokens} /></div>
+          ) : (
+            <div className="text-[32px] font-semibold leading-none tabular-nums" style={{ color: "var(--success)" }}>
+              <NumberFlow value={cost} format={{ style: "currency", currency: "USD", minimumFractionDigits: 2 }} />
+            </div>
+          )}
           <div className="text-[11px] t-dim2 mt-1.5 tabular-nums">
-            <NumberFlow value={tokens} /> tokens · {(cached / 1000).toFixed(0)}k cached
+            {primaryWater ? (
+              <>{boundary} · estimated</>
+            ) : primaryTokens ? (
+              <>${cost.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · {(cached / 1000).toFixed(0)}k cached</>
+            ) : (
+              <><NumberFlow value={tokens} /> tokens · {(cached / 1000).toFixed(0)}k cached</>
+            )}
           </div>
+          {showWater && !primaryWater && (
+            <div className="text-[11px] mt-1 tabular-nums" style={{ color: "var(--info)" }}>
+              {waterInline} · estimated
+            </div>
+          )}
+          {showWater && impact?.settings.estimate_display === "components" && (
+            <div className="text-[10px] t-dim2 mt-0.5 tabular-nums">{waterComponents}</div>
+          )}
+          {display === "all" && (
+            <div className="text-[10px] t-dim2 mt-0.5 tabular-nums">
+              {impact?.totals.energy_wh.central === null
+                ? "energy unknown"
+                : `${impact!.totals.energy_wh.central!.toLocaleString("en-US", { maximumSignificantDigits: 3 })} Wh`}
+            </div>
+          )}
         </div>
         <Spark values={spark} color="var(--success)" />
         <div className="hidden sm:block w-px self-stretch my-1" style={{ background: "color-mix(in srgb, var(--primary) 14%, transparent)" }} />

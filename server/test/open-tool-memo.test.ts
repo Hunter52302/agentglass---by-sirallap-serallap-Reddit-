@@ -43,7 +43,9 @@ const preNoId = (session: string, at: number) => ({ ...base, session_id: session
 const postNoId = (session: string, at: number) => ({ ...base, session_id: session, hook_event_type: "PostToolUse", tool_name: "Bash", tool_use_id: null, timestamp: at });
 
 beforeAll(async () => {
-  db = await import("../src/db.ts");
+  // Other suites import db.ts too. Force this fixture to open the database path
+  // configured above instead of inheriting whichever singleton loaded first.
+  db = await import(`../src/db.ts?u=${Math.random()}`);
 });
 
 describe("open-tool memo", () => {

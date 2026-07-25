@@ -1,4 +1,4 @@
-// Glasses for Argus — filesystem write observation.
+// AgentGlass Argus integration — filesystem write observation.
 //
 // Origin: Argus src/watcher.js — MIT © 2026 Zac Rieger.
 // Ported to TypeScript. Deliberate change from Argus: the chokidar fallback is
@@ -201,7 +201,7 @@ export function startWatcher(
         }, 40),
       });
     });
-    watcher.on('error', (err: any) => {
+    (watcher as any).on('error', (err: any) => {
       if (err && err.code !== 'EPERM' && err.code !== 'ENOENT') {
         console.error(`[argus/watcher] ${err.code || ''} ${err.message || err}`);
       }

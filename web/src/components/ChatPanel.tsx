@@ -33,11 +33,19 @@ import { useSidebarWidth } from "../lib/sidebarWidth.ts";
 import { SidebarGrip } from "./SidebarGrip.tsx";
 
 // Still hand-maintained, and still drifts every release — the runtime-sourced
-// list is its own job. The 1M entry is here because it is what this fix buys:
-// the suffix now survives the server, so the window is actually selectable.
+// list is its own job.
+//
+// The `· 1M` entry no longer changes what this app measures: `ctxLimitOf`
+// knows Opus 5 is a 1M model, so the plain id and the suffixed one resolve to
+// the same ceiling. It stays because the suffix is not ours to interpret — it
+// is what `claude` reads to pick a window behind an LLM gateway or on Bedrock
+// / Vertex / Foundry, where the plain id really does mean 200k. Locally the
+// two entries are the same choice; for someone pointed at a provider they are
+// not, and only they can tell which.
 const MODELS = [
-  { id: "claude-opus-4-8", label: "Opus 4.8" },
-  { id: "claude-opus-4-8[1m]", label: "Opus 4.8 · 1M" },
+  { id: "claude-fable-5", label: "Fable 5" },
+  { id: "claude-opus-5", label: "Opus 5" },
+  { id: "claude-opus-5[1m]", label: "Opus 5 · 1M" },
   { id: "claude-sonnet-5", label: "Sonnet 5" },
   { id: "claude-haiku-4-5", label: "Haiku 4.5" },
 ];

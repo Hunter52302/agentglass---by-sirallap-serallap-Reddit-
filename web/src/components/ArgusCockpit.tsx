@@ -1,4 +1,4 @@
-// Glasses for Argus — Argus's own cockpit.
+// AgentGlass Argus integration — Argus's own cockpit.
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md at the repo root.
 //
@@ -127,6 +127,7 @@ function Toggle({ on, label, title, onClick }: { on: boolean; label: string; tit
 }
 
 export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const { ask, dialog } = useDialogs();
   const [status, setStatus] = useState<EnvTierStatus | null>(null);
   const [summary, setSummary] = useState<EnvSummary | null>(null);
   const [lanes, setLanes] = useState<ActorLane[]>([]);
@@ -152,7 +153,6 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
   const [shells, setShells] = useState<PtyShell[]>([]);
   const [openShell, setOpenShell] = useState<string | null>(null);
   const [redlineEditorOpen, setRedlineEditorOpen] = useState(false);
-  const { ask, dialog } = useDialogs();
 
   const refresh = useCallback(() => {
     api.envStatus().then(setStatus).catch(() => {});
@@ -267,6 +267,7 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
   if (!open) return null;
 
   return (
+    <>
     <Portal>
       <div className="fixed inset-0 z-[60] flex flex-col" style={{ background: "var(--bg)" }}>
         {/* ── header: the lens, and the controls that move it ── */}
@@ -715,12 +716,13 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
         </>
         )}
       </div>
+    </Portal>
       <RedlineEditor
         open={redlineEditorOpen}
         onClose={() => setRedlineEditorOpen(false)}
         onSaved={refresh}
       />
       {dialog}
-    </Portal>
+    </>
   );
 }

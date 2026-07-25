@@ -47,14 +47,36 @@ function pick(obj: Record<string, unknown> | undefined, ...keys: string[]): unkn
   return undefined;
 }
 
+function object(v: unknown): Record<string, unknown> | undefined {
+  return v && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : undefined;
+}
+
+function nested(obj: Record<string, unknown>, key: string, child: string): unknown {
+  return object(obj[key])?.[child];
+}
+
 /** Extract token usage from a single message/usage-like object (tolerant of shapes). */
-function usageFrom(u: Record<string, unknown> | undefined): TokenUsage {
+export function usageFrom(u: Record<string, unknown> | undefined): TokenUsage {
   if (!u || typeof u !== "object") return {};
+  const totalInput = num(pick(u, "input_tokens", "prompt_tokens"));
+  const directCacheRead = num(pick(u, "cache_read_input_tokens", "cache_read_tokens"));
+  const openAiCachedValues = [
+    nested(u, "input_tokens_details", "cached_tokens"),
+    nested(u, "input_token_details", "cached_tokens"),
+    nested(u, "prompt_tokens_details", "cached_tokens"),
+    u.input_cached_tokens,
+  ];
+  const hasOpenAiCachedShape = openAiCachedValues.some((v) => v !== undefined && v !== null);
+  // Providers may repeat the same cached count in aggregate and nested fields.
+  // They are alternate representations, never additive.
+  const cachedInput = Math.max(directCacheRead, ...openAiCachedValues.map(num));
   return {
-    input_tokens: num(pick(u, "input_tokens", "prompt_tokens")),
+    // OpenAI input/prompt totals include cached input. Anthropic input does not,
+    // so subtraction is gated on the OpenAI-specific fields above.
+    input_tokens: hasOpenAiCachedShape ? Math.max(0, totalInput - cachedInput) : totalInput,
     output_tokens: num(pick(u, "output_tokens", "completion_tokens")),
     cache_creation_tokens: num(pick(u, "cache_creation_input_tokens", "cache_creation_tokens")),
-    cache_read_tokens: num(pick(u, "cache_read_input_tokens", "cache_read_tokens")),
+    cache_read_tokens: cachedInput,
   };
 }
 

@@ -1,4 +1,4 @@
-// Glasses for Argus — the cockpit's environment panel.
+// AgentGlass Argus integration — the cockpit's environment panel.
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md at the repo root.
 //

@@ -42,7 +42,7 @@ export type { HookSetupStatus, HookSetupResult };
 // alone reads getpwuid and ignores $HOME, so under a custom HOME the sidecar
 // would write settings.json where Claude Code will never read it.
 function home(): string {
-  const env = process.platform === "win32" ? process.env.USERPROFILE : process.env.HOME;
+  const env = process.env.HOME || (process.platform === "win32" ? process.env.USERPROFILE : undefined);
   return env && env.length ? env : homedir();
 }
 

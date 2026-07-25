@@ -155,6 +155,7 @@ export function RedlineEditor({ open, onClose, onSaved }: {
   if (!open) return null;
 
   return (
+    <>
     <Portal>
       <div className="fixed inset-0 z-[80] flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,.58)" }}>
         <div className="w-full max-w-[1050px] max-h-[92vh] overflow-hidden rounded-xl border flex flex-col"
@@ -251,7 +252,8 @@ export function RedlineEditor({ open, onClose, onSaved }: {
           </div>
         </div>
       </div>
-      {dialog}
     </Portal>
+    {dialog}
+    </>
   );
 }

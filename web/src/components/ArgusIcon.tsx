@@ -1,4 +1,4 @@
-// Glasses for Argus — the Argus glyph.
+// AgentGlass Argus integration — the Argus glyph.
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md.
 //

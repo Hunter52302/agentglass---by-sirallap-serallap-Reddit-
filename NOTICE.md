@@ -1,6 +1,6 @@
-# Glasses for Argus — provenance and licensing
+# agentglass Argus integration — provenance and licensing
 
-**Glasses for Argus** is a local, experimental merge of two independent
+This **agentglass Argus integration** is a local, experimental merge of two independent
 projects. It is not a product, not a release, and not affiliated with or
 endorsed by either upstream beyond the licenses below.
 

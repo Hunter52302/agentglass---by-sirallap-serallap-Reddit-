@@ -1,4 +1,4 @@
-// Glasses for Argus — reveal a path in the OS file manager.
+// AgentGlass Argus integration — reveal a path in the OS file manager.
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md.
 //

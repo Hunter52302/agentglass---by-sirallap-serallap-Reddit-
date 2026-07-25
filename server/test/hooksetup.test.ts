@@ -3,7 +3,7 @@
 // port of hooks/install_hooks.py — so the property that matters most is that the
 // two AGREE: either can undo the other, and neither disturbs a third party's
 // hooks. Every case here is one a real settings.json can be in.
-import { describe, expect, test, beforeEach } from "bun:test";
+import { afterAll, describe, expect, test, beforeEach } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +18,8 @@ const { doInstall, doUninstall, isOurs, EVENTS, MARKER } = _internal;
 // hooksetup reads homedir() at call time, not import time, so setting it here
 // is enough — no module cache to fight.
 let HOME = "";
+const ORIGINAL_HOME = process.env.HOME;
+const ORIGINAL_USERPROFILE = process.env.USERPROFILE;
 function settingsFile() { return join(HOME, ".claude", "settings.json"); }
 function writeSettings(obj: unknown) {
   mkdirSync(join(HOME, ".claude"), { recursive: true });
@@ -31,6 +33,12 @@ beforeEach(() => {
   HOME = mkdtempSync(join(tmpdir(), "agx-hooks-"));
   process.env.HOME = HOME;
   delete process.env.USERPROFILE; // homedir() prefers this on some platforms
+});
+
+afterAll(() => {
+  if (ORIGINAL_HOME === undefined) delete process.env.HOME; else process.env.HOME = ORIGINAL_HOME;
+  if (ORIGINAL_USERPROFILE === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = ORIGINAL_USERPROFILE;
 });
 
 describe("merge logic (pure, no disk)", () => {

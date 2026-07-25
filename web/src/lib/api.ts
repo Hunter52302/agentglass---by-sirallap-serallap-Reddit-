@@ -1,5 +1,6 @@
 import type { WatchEvent, SessionRollup, StatsSummary, SkillInfo, FileChange, DiffHunk, Insight, SearchHit, PendingGate, GateRecord, SessionDetail, GitStatusResponse, CommitResult, WalkthroughResult, WalkthroughInputFile, GitRepoRef, FsCompletion, WorkingTree, GitActionResult, GitBranch, GitCommit, GitStash, GitGraphLine, GitWorktree, WorktreeLeftovers, GitRemote, GitRemoteBranch, GitTag, GitReflogEntry, GitLogEntry, DockerOverview, DockerStat, DockerActionResult, DockerCapability, TerminalCommands, ChatImage, ConflictBlock, BlockChoice, UpdateStatus, ReleaseNotes, PrListResponse, PrDetail, PrActionResult, GitCapability, HookSetupStatus, HookSetupResult } from "../../../shared/types.ts";
 import type { EnvTierStatus, EnvSummary, EnvRuntime, EnvConnection, EnvEvent, FsMap, ActorLane, SuspectRollup, EnvTier, RedlineRuleInput, RedlineStatus, KillableGate, ReplayBounds, ReplayState, PtyShell } from "../../../shared/env.ts";
+import type { ImpactProfile, ImpactSettings, ImpactSummary } from "../../../shared/impact.ts";
 import * as demo from "./demo.ts";
 
 export const IS_DEMO = demo.IS_DEMO;
@@ -203,6 +204,14 @@ const realApi = {
   projects: () => get<{ projects: { source_app: string; path: string }[]; scanning: boolean; workspace: string | null }>("/projects"),
   stats: (windowMs: number, provider?: string) =>
     get<StatsSummary>(`/stats?window=${windowMs}${provider ? `&provider=${encodeURIComponent(provider)}` : ""}`),
+  impact: (windowMs: number, filters: { provider?: string; model?: string; agent?: string; water_type?: "consumption" | "withdrawal" } = {}) => {
+    const q = new URLSearchParams({ window: String(windowMs) });
+    for (const [key, value] of Object.entries(filters)) if (value) q.set(key, value);
+    return get<ImpactSummary>(`/impact?${q}`);
+  },
+  impactProfiles: () => get<{ profiles: ImpactProfile[] }>("/impact/profiles"),
+  impactSettings: () => get<ImpactSettings>("/impact/settings"),
+  setImpactSettings: (settings: Partial<ImpactSettings>) => post<ImpactSettings>("/impact/settings", settings),
   sessions: (limit = 100, provider?: string) =>
     get<SessionRollup[]>(`/sessions?limit=${limit}${provider ? `&provider=${encodeURIComponent(provider)}` : ""}`),
   filterOptions: () =>
@@ -216,7 +225,7 @@ const realApi = {
   changes: (limit = 200) => get<{ changes: FileChange[] }>(`/changes?limit=${limit}`),
   session: (id: string) => get<SessionDetail>(`/session?id=${encodeURIComponent(id)}`),
   insights: () => get<{ insights: Insight[] }>(`/insights`),
-  // Glasses for Argus — the environment tier. Separate endpoints because this
+  // AgentGlass Argus integration — the environment tier. Separate endpoints because this
   // is a separate table: observations about the machine, not agent telemetry.
   envStatus: () => get<EnvTierStatus>(`/env/status`),
   envSummary: () => get<EnvSummary>(`/env/summary`),
@@ -482,11 +491,39 @@ const DEMO_ENV_STATUS: EnvTierStatus = {
   platform: "demo",
 };
 
+const DEMO_IMPACT_SETTINGS: ImpactSettings = {
+  display_mode: "cost", water_unit: "auto", boundary: "source_native",
+  estimate_display: "central_range", profile_behavior: "strict",
+  unavailable_behavior: "show", proxy_profile_id: null,
+  regional_factor_id: "lbnl-us-grid-2023", lifecycle_enabled: false,
+  daily_budget_ml: null, weekly_budget_ml: null, monthly_budget_ml: null,
+  window_budget_ml: null, custom_budget_ml: null, custom_period_ms: null,
+};
+const emptyImpactTotal = () => ({
+  energy_wh: { low: null, central: null, high: null },
+  water_consumption_ml: { low: null, central: null, high: null },
+  water_withdrawal_ml: { low: null, central: null, high: null },
+  water_s1_ml: { low: null, central: null, high: null },
+  water_s2_ml: { low: null, central: null, high: null },
+  water_s3_ml: { low: null, central: null, high: null },
+  known_rows: 0, unknown_rows: 0, incomplete: false,
+  boundary_label: "water unavailable", source_refs: [],
+});
+const demoImpact = (windowMs: number): ImpactSummary => ({
+  totals: emptyImpactTotal(), by_model: [], by_provider: [], by_session: [],
+  by_agent: [], by_request_group: [], timeline: [], profiles: [],
+  settings: DEMO_IMPACT_SETTINGS, budgets: [], factors: [], window_ms: windowMs,
+});
+
 const demoApi: typeof realApi = {
   recent: () => D(demo.recent()),
   // The demo is a showcase of the whole fleet, so it is never scoped.
   projects: () => D({ projects: [], scanning: false, workspace: null }),
   stats: (windowMs: number, provider?: string) => D(demo.stats(windowMs, provider)),
+  impact: (windowMs: number) => D(demoImpact(windowMs)),
+  impactProfiles: () => D({ profiles: [] as ImpactProfile[] }),
+  impactSettings: () => D(DEMO_IMPACT_SETTINGS),
+  setImpactSettings: () => D(DEMO_IMPACT_SETTINGS),
   sessions: (_limit?: number, provider?: string) => D(demo.sessions(provider)),
   filterOptions: () => D(demo.filterOptions()),
   exportUrl: (fmt: "csv" | "json") => demo.eventsExportUri(fmt),

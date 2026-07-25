@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { WatchEvent, SessionRollup } from "../../shared/types.ts";
 import { useLive } from "./lib/useLive.ts";
 import { useStats } from "./lib/useStats.ts";
+import { useImpact } from "./lib/useImpact.ts";
 import { deriveAgents, deriveAlerts, buildTitles } from "./lib/derive.ts";
 import { providerOf } from "./lib/format.ts";
 import { api, IS_DEMO } from "./lib/api.ts";
@@ -22,7 +23,7 @@ import { ArgusCockpit } from "./components/ArgusCockpit.tsx";
 import { Alerts } from "./components/Alerts.tsx";
 import { Fleet } from "./components/Fleet.tsx";
 import { Feed } from "./components/Feed.tsx";
-import { CostByModel } from "./components/CostByModel.tsx";
+import { ImpactByModel } from "./components/ImpactByModel.tsx";
 import { Latency } from "./components/Latency.tsx";
 import { Sessions } from "./components/Sessions.tsx";
 import { MissionTimeline } from "./components/MissionTimeline.tsx";
@@ -180,6 +181,7 @@ export default function App() {
   // used to refetch /stats on every single event (a per-event server query +
   // full chart re-render). The 4s interval is plenty for a summary.
   const { stats } = useStats(windowMs, undefined, filter.provider);
+  const { impact, reload: reloadImpact } = useImpact(windowMs, filter.provider);
 
   useEffect(() => {
     applyTheme(theme);
@@ -520,55 +522,55 @@ export default function App() {
       <main className="flex-1 min-h-0 p-3 overflow-auto">
         <CockpitGrid widgets={[
           {
-            id: "kpis", title: "Overview", width: 12, height: 3,
-            content: <Kpis stats={stats} agents={agents} startedAt={startedAt} epm={epm} />,
+            id: "kpis", title: "Overview", x: 0, y: 0, width: 12, height: 3,
+            content: <Kpis stats={stats} impact={impact} agents={agents} startedAt={startedAt} epm={epm} />,
           },
           {
-            id: "fleet", title: "Fleet", width: 3, height: 7,
-            content: <Fleet agents={agents} activeApp={filter.app}
+            id: "fleet", title: "Fleet", x: 0, y: 3, width: 3, height: 7,
+            content: <Fleet impact={impact} agents={agents} activeApp={filter.app}
               onSelect={(a) => setSessionView({ id: a.session_id, app: a.source_app })} />,
           },
           {
-            id: "throughput", title: "Throughput", width: 3, height: 2,
+            id: "throughput", title: "Throughput", x: 3, y: 3, width: 3, height: 2,
             content: <Throughput events={visibleEvents} />,
           },
           {
-            id: "tool-mix", title: "Tool mix", width: 3, height: 2,
+            id: "tool-mix", title: "Tool mix", x: 6, y: 3, width: 3, height: 2,
             content: <ToolMix events={visibleEvents} />,
           },
           {
-            id: "feed", title: "Live events", width: 6, height: 5,
+            id: "feed", title: "Live events", x: 3, y: 5, width: 6, height: 5,
             content: <Feed events={events} filter={filter} sessionProvider={sessionProvider}
               onSelect={setSelected} onClearFilter={clearFilters} />,
           },
           {
-            id: "radar", title: "Radar", width: 3, height: 3,
+            id: "radar", title: "Radar", x: 9, y: 3, width: 3, height: 3,
             content: <Radar agents={agents}
               onSelect={(a) => setFilter((f) => ({ ...f, app: a.source_app }))} />,
           },
           {
-            id: "environment", title: "Argus", width: 3, height: 2,
+            id: "environment", title: "Argus", x: 9, y: 6, width: 3, height: 2,
             content: <Environment onOpen={() => setArgusOpen(true)} />,
           },
           {
-            id: "alerts", title: "Alerts", width: 3, height: 2,
+            id: "alerts", title: "Alerts", x: 9, y: 8, width: 3, height: 2,
             content: <Alerts alerts={alerts} agents={agents}
               onSelectApp={(app) => setFilter((f) => ({ ...f, app }))} />,
           },
           {
-            id: "cost", title: "Cost by model", width: 4, height: 3,
-            content: <CostByModel stats={stats} />,
+            id: "cost", title: "Impact by model", x: 0, y: 10, width: 4, height: 3,
+            content: <ImpactByModel stats={stats} impact={impact} />,
           },
           {
-            id: "latency", title: "Latency", width: 4, height: 3,
+            id: "latency", title: "Latency", x: 4, y: 10, width: 4, height: 3,
             content: <Latency stats={stats} />,
           },
           {
-            id: "sessions", title: "Sessions", width: 4, height: 3,
+            id: "sessions", title: "Sessions", x: 8, y: 10, width: 4, height: 3,
             content: <Sessions provider={filter.provider} />,
           },
           {
-            id: "timeline", title: "Mission timeline", width: 12, height: 2,
+            id: "timeline", title: "Mission timeline", x: 0, y: 13, width: 12, height: 2,
             content: <MissionTimeline stats={stats} />,
           },
         ]} />
@@ -593,6 +595,8 @@ export default function App() {
         onZoom={zoom}
         onOpenStats={() => setStatsOpen(true)}
         onOpenHelp={() => setHelpOpen(true)}
+        impact={impact}
+        onImpactChange={reloadImpact}
       />
       <SessionModal
         sessionId={sessionView?.id ?? null}

@@ -1,4 +1,4 @@
-// Glasses for Argus — environment-tier persistence.
+// AgentGlass Argus integration — environment-tier persistence.
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md.
 //
@@ -408,7 +408,7 @@ export interface ActorLane {
   provider: string | null;
   /** Most recent events for this actor, newest first. */
   events: EnvEvent[];
-  /** Activity counts across equal buckets in the requested window. */
+  /** Activity per time bucket across the requested window, oldest first. */
   buckets: number[];
 }
 

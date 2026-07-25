@@ -1,8 +1,10 @@
 import { useMemo, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import type { AgentCard, AgentOutcome } from "../lib/derive.ts";
+import type { ImpactBreakdownRow, ImpactSummary } from "../../../shared/impact.ts";
 import { Panel } from "./Panel.tsx";
 import { fmtUsd, fmtTokens, fmtAgo, modelLabelOf } from "../lib/format.ts";
+import { displayHasWater, formatWaterInline } from "../lib/impact.ts";
 
 // "now ago" reads wrong — fmtAgo already returns "now" for the freshest events.
 const ago = (ts: number) => {
@@ -82,9 +84,21 @@ function Spark({ data, color }: { data: number[]; color: string }) {
   );
 }
 
-function SessionCard({ a, selected, onSelect }: { a: AgentCard; selected: boolean; onSelect?: (a: AgentCard) => void }) {
+function SessionCard({ a, selected, impact, summary, onSelect }: {
+  a: AgentCard;
+  selected: boolean;
+  impact?: ImpactBreakdownRow;
+  summary: ImpactSummary | null;
+  onSelect?: (a: AgentCard) => void;
+}) {
   const st = STATUS[a.status];
   const model = modelLabelOf(a.model_name);
+  const mode = summary?.settings.display_mode ?? "cost";
+  const showTokens = mode !== "water";
+  const showCost = mode !== "water";
+  const showWater = !!summary && displayHasWater(mode)
+    && (summary.settings.unavailable_behavior === "show" || impact?.water_consumption_ml.central !== null);
+  const water = impact ? formatWaterInline(impact, summary!.settings) : "water unknown";
   return (
     <motion.div
       onClick={() => onSelect?.(a)}
@@ -166,16 +180,26 @@ function SessionCard({ a, selected, onSelect }: { a: AgentCard; selected: boolea
       <div className="mt-1.5 flex items-center gap-3 text-[10px] t-dim2 tabular-nums">
         <span>{a.tools} tools</span>
         {a.errors > 0 && <span style={{ color: "var(--error)" }}>{a.errors} err</span>}
-        <span className="t-dim">{fmtTokens(a.tokens)} tok</span>
-        <span style={{ color: "var(--success)" }}>{fmtUsd(a.cost)}</span>
+        {showTokens && <span className="t-dim">{fmtTokens(a.tokens)} tok</span>}
+        {showCost && <span style={{ color: "var(--success)" }}>{fmtUsd(a.cost)}</span>}
+        {showWater && <span style={{ color: "var(--info)" }}>{water}</span>}
         <span className="ml-auto">{ago(a.lastSeen)}</span>
       </div>
     </motion.div>
   );
 }
 
-export function Fleet({ agents, activeApp, onSelect }: { agents: AgentCard[]; activeApp?: string; onSelect?: (a: AgentCard) => void }) {
+export function Fleet({ agents, impact, activeApp, onSelect }: {
+  agents: AgentCard[];
+  impact: ImpactSummary | null;
+  activeApp?: string;
+  onSelect?: (a: AgentCard) => void;
+}) {
   const [overrides, setOverrides] = useState<Record<string, boolean>>({});
+  const impactBySession = useMemo(
+    () => new Map((impact?.by_session ?? []).map((row) => [row.session_id ?? row.key, row])),
+    [impact],
+  );
 
   // Group sessions by project (source_app); order groups by most-recent activity.
   const groups = useMemo(() => {
@@ -240,7 +264,8 @@ export function Fleet({ agents, activeApp, onSelect }: { agents: AgentCard[]; ac
                 {!collapsed && (
                   <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} className="space-y-2 overflow-hidden">
                     {list.map((a) => (
-                      <SessionCard key={a.key} a={a} selected={!!activeApp && a.source_app === activeApp} onSelect={onSelect} />
+                      <SessionCard key={a.key} a={a} impact={impactBySession.get(a.session_id)}
+                        summary={impact} selected={!!activeApp && a.source_app === activeApp} onSelect={onSelect} />
                     ))}
                   </motion.div>
                 )}

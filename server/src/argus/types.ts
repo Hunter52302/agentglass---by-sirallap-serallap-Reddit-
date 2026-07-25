@@ -1,4 +1,4 @@
-// Glasses for Argus — server-side environment tier types.
+// AgentGlass Argus integration — server-side environment tier types.
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md.
 //

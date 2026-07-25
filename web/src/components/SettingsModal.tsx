@@ -20,6 +20,7 @@ import { rendererPref, setRendererPref, type RendererPref } from "../lib/termRen
 import { canZoomIn, canZoomOut, fmtScale } from "../lib/uiScale.ts";
 import { MOD_KEY } from "../lib/format.ts";
 import type { UpdateStatus, ReleaseNotes, HookSetupStatus } from "../../../shared/types.ts";
+import type { ImpactSettings, ImpactSummary } from "../../../shared/impact.ts";
 import { sysNotifyMode, setSysNotifyMode, notifyCapability, notifyQuiet, setNotifyQuiet, type SysNotifyMode, type NotifyCapability } from "../lib/sysNotify.ts";
 import { clock24, setClock24 } from "../lib/clockPref.ts";
 import { bindings, rebind, resetBindings, subscribeBindings, isCustomised, LABELS, DEFAULTS, type ActionId,
@@ -120,9 +121,10 @@ function Row({ label, hint, kbd, href, download, onClick }: { label: string; hin
     : <button onClick={onClick} className={cls}>{body}</button>;
 }
 
-type Pane = "prefs" | "keys" | "open" | "export" | "hooks" | "about";
+type Pane = "prefs" | "impact" | "keys" | "open" | "export" | "hooks" | "about";
 const TABS: { id: Pane; label: string }[] = [
   { id: "prefs", label: "Preferences" },
+  { id: "impact", label: "Environmental impact" },
   { id: "keys", label: "Shortcuts" },
   { id: "open", label: "Open" },
   { id: "export", label: "Export" },
@@ -136,6 +138,213 @@ function Section({ title, children }: { title: string; children: React.ReactNode
       <div className="panel-eyebrow px-3 pb-1">{title}</div>
       {children}
     </div>
+  );
+}
+
+function BudgetInput({ label, value, onSave, disabled }: {
+  label: string;
+  value: number | null;
+  onSave: (value: number | null) => void;
+  disabled: boolean;
+}) {
+  const [draft, setDraft] = useState(value === null ? "" : String(value));
+  useEffect(() => setDraft(value === null ? "" : String(value)), [value]);
+  return (
+    <label className="flex items-center gap-3 px-3 py-2">
+      <span className="text-[11.5px] flex-1" style={{ color: "var(--text2)" }}>{label}</span>
+      <input type="number" min="0" step="any" inputMode="decimal" value={draft} disabled={disabled}
+        aria-label={`${label} water budget in milliliters`}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={() => {
+          const parsed = draft.trim() === "" ? null : Number(draft);
+          if (parsed === null || (Number.isFinite(parsed) && parsed >= 0)) onSave(parsed);
+        }}
+        className="w-32 rounded-md px-2 py-1 text-[11px] tabular-nums"
+        placeholder="No budget"
+        style={{ color: "var(--text)", background: "var(--bg3)", border: "1px solid color-mix(in srgb, var(--border) 50%, transparent)" }} />
+      <span className="text-[10px] t-dim2 w-5">mL</span>
+    </label>
+  );
+}
+
+function CustomPeriodInput({ value, onSave, disabled }: {
+  value: number | null;
+  onSave: (value: number | null) => void;
+  disabled: boolean;
+}) {
+  const days = value === null ? "" : String(value / 86_400_000);
+  const [draft, setDraft] = useState(days);
+  useEffect(() => setDraft(days), [days]);
+  return (
+    <label className="flex items-center gap-3 px-3 py-2">
+      <span className="text-[11.5px] flex-1" style={{ color: "var(--text2)" }}>Custom period</span>
+      <input type="number" min="0.00001" step="any" inputMode="decimal" value={draft} disabled={disabled}
+        aria-label="Custom water budget period in days"
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={() => {
+          const parsed = draft.trim() === "" ? null : Number(draft);
+          if (parsed === null || (Number.isFinite(parsed) && parsed > 0)) onSave(parsed === null ? null : parsed * 86_400_000);
+        }}
+        className="w-32 rounded-md px-2 py-1 text-[11px] tabular-nums"
+        placeholder="No period"
+        style={{ color: "var(--text)", background: "var(--bg3)", border: "1px solid color-mix(in srgb, var(--border) 50%, transparent)" }} />
+      <span className="text-[10px] t-dim2 w-5">days</span>
+    </label>
+  );
+}
+
+function ImpactPane({ impact, onChange }: { impact: ImpactSummary | null; onChange: () => void }) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const settings = impact?.settings;
+  const save = async (patch: Partial<ImpactSettings>) => {
+    setSaving(true);
+    setError("");
+    try {
+      await api.setImpactSettings(patch);
+      onChange();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setSaving(false);
+    }
+  };
+  if (!settings) return <Section title="Environmental impact"><div className="px-3 py-3 text-[11px] t-dim2">Reading impact settings…</div></Section>;
+  return (
+    <>
+      <Section title="Display">
+        <Choice<ImpactSettings["display_mode"]>
+          label="Primary metrics"
+          hint="Cost remains default. Water estimates appear only when selected."
+          value={settings.display_mode}
+          onPick={(value) => void save({ display_mode: value })}
+          disabled={saving}
+          options={[
+            { v: "cost", label: "Cost" },
+            { v: "tokens", label: "Tokens" },
+            { v: "water", label: "Water" },
+            { v: "cost_water", label: "Cost + water" },
+            { v: "tokens_water", label: "Tokens + water" },
+            { v: "all", label: "All metrics" },
+          ]} />
+        <Choice<ImpactSettings["water_unit"]>
+          label="Water units"
+          hint="Bottle values describe volume only. No manufacturing or disposal claim."
+          value={settings.water_unit}
+          onPick={(value) => void save({ water_unit: value })}
+          disabled={saving}
+          options={[
+            { v: "auto", label: "Automatic" },
+            { v: "ml", label: "mL" },
+            { v: "l", label: "Liters" },
+            { v: "us_gallon", label: "US gallons" },
+            { v: "bottle_16oz", label: "16-fl-oz bottles" },
+          ]} />
+        <Choice<ImpactSettings["estimate_display"]>
+          label="Estimate display"
+          hint="Components preserve Scope 1, 2, 3, and unknown-scope separation."
+          value={settings.estimate_display}
+          onPick={(value) => void save({ estimate_display: value })}
+          disabled={saving}
+          options={[
+            { v: "central", label: "Central" },
+            { v: "range", label: "Range" },
+            { v: "central_range", label: "Central + range" },
+            { v: "components", label: "Components" },
+          ]} />
+      </Section>
+      <Section title="Methodology">
+        <Choice<ImpactSettings["boundary"]>
+          label="Water boundary"
+          hint="Source native never converts an undisclosed or published boundary into another scope."
+          value={settings.boundary}
+          onPick={(value) => void save({ boundary: value })}
+          disabled={saving}
+          options={[
+            { v: "direct_s1", label: "Direct onsite" },
+            { v: "operational_s1_s2", label: "Operational S1 + S2" },
+            { v: "lifecycle_s1_s2_s3", label: "Lifecycle S1 + S2 + S3" },
+            { v: "source_native", label: "Source native" },
+          ]} />
+        <Choice<ImpactSettings["profile_behavior"]>
+          label="Profile behavior"
+          hint="Strict mode never borrows another provider's profile."
+          value={settings.profile_behavior}
+          onPick={(value) => void save({ profile_behavior: value })}
+          disabled={saving}
+          options={[
+            { v: "strict", label: "Strict source-aware" },
+            { v: "selected_proxy", label: "Use selected proxy" },
+          ]} />
+        {settings.profile_behavior === "selected_proxy" && (
+          <label className="flex items-center gap-3 px-3 py-2.5">
+            <span className="flex-1">
+              <span className="block text-[12.5px]" style={{ color: "var(--text)" }}>Proxy profile</span>
+              <span className="block text-[10.5px] t-dim2">Explicit fallback. Result remains labeled user-selected proxy.</span>
+            </span>
+            <select value={settings.proxy_profile_id ?? ""} disabled={saving}
+              onChange={(event) => void save({ proxy_profile_id: event.target.value || null })}
+              className="max-w-[260px] rounded-md px-2 py-1.5 text-[10.5px]"
+              style={{ background: "var(--bg3)", color: "var(--text)", border: "1px solid var(--border)" }}>
+              <option value="">Choose profile</option>
+              {(impact?.profiles ?? []).map((profile) => (
+                <option key={`${profile.profile_id}@${profile.profile_version}`} value={profile.profile_id}>
+                  {profile.profile_id} · v{profile.profile_version}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        <Choice<ImpactSettings["unavailable_behavior"]>
+          label="Unavailable estimates"
+          hint="Unknown remains unknown. It never renders as zero."
+          value={settings.unavailable_behavior}
+          onPick={(value) => void save({ unavailable_behavior: value })}
+          disabled={saving}
+          options={[
+            { v: "show", label: "Show explicitly" },
+            { v: "hide", label: "Hide" },
+          ]} />
+        <label className="flex items-center gap-3 px-3 py-2.5">
+          <span className="flex-1">
+            <span className="block text-[12.5px]" style={{ color: "var(--text)" }}>Regional electricity factor</span>
+            <span className="block text-[10.5px] t-dim2">National or regional scenario. Never presented as local measurement.</span>
+          </span>
+          <select value={settings.regional_factor_id} disabled={saving}
+            onChange={(event) => void save({ regional_factor_id: event.target.value })}
+            className="max-w-[260px] rounded-md px-2 py-1.5 text-[10.5px]"
+            style={{ background: "var(--bg3)", color: "var(--text)", border: "1px solid var(--border)" }}>
+            {(impact?.factors ?? []).map((factor) => (
+              <option key={`${factor.factor_id}@${factor.version}`} value={factor.factor_id}>
+                {factor.label} · {factor.liters_per_kwh} L/kWh
+              </option>
+            ))}
+          </select>
+        </label>
+        <Toggle on={settings.lifecycle_enabled} onClick={() => void save({ lifecycle_enabled: !settings.lifecycle_enabled })}
+          label="Lifecycle mode"
+          hint="Allows explicit Scope 3 profiles. Never adds manufacturing silently." />
+      </Section>
+      <Section title="User-defined water budgets">
+        <div className="px-3 pb-1 text-[10px] t-dim2">Optional tracking thresholds. No moral or recommended allowance.</div>
+        <BudgetInput label="Daily" value={settings.daily_budget_ml} disabled={saving} onSave={(value) => void save({ daily_budget_ml: value })} />
+        <BudgetInput label="Weekly" value={settings.weekly_budget_ml} disabled={saving} onSave={(value) => void save({ weekly_budget_ml: value })} />
+        <BudgetInput label="Monthly" value={settings.monthly_budget_ml} disabled={saving} onSave={(value) => void save({ monthly_budget_ml: value })} />
+        <BudgetInput label="Dashboard window" value={settings.window_budget_ml} disabled={saving} onSave={(value) => void save({ window_budget_ml: value })} />
+        <BudgetInput label="Custom" value={settings.custom_budget_ml} disabled={saving} onSave={(value) => void save({ custom_budget_ml: value })} />
+        <CustomPeriodInput value={settings.custom_period_ms} disabled={saving} onSave={(value) => void save({ custom_period_ms: value })} />
+        {impact?.budgets.map((budget) => (
+          <div key={budget.period} className="px-3 py-1 text-[10px] t-dim2">
+            {budget.period}: {budget.remaining.central === null ? "remaining unknown" : `${budget.remaining.central.toLocaleString("en-US", { maximumSignificantDigits: 3 })} mL remaining`}
+            {budget.incomplete ? " · incomplete due to unknown impact" : ""}
+          </div>
+        ))}
+      </Section>
+      <div className="px-5 py-3 text-[10px] t-dim2">
+        Changes apply to new estimates and the active aggregation view. Historical rows keep original profile/version.
+        {error && <span className="block mt-1" style={{ color: "var(--error)" }}>{error}</span>}
+      </div>
+    </>
   );
 }
 
@@ -459,10 +668,11 @@ function HooksPane({ open }: { open: boolean }) {
   );
 }
 
-export function SettingsModal({ open, onClose, sound, onSound, scale, onZoom, onOpenStats, onOpenHelp }: {
+export function SettingsModal({ open, onClose, sound, onSound, scale, onZoom, onOpenStats, onOpenHelp, impact, onImpactChange }: {
   open: boolean; onClose: () => void; sound: boolean; onSound: () => void;
   scale: number; onZoom: (dir: 1 | -1 | 0) => void;
   onOpenStats: () => void; onOpenHelp: () => void;
+  impact: ImpactSummary | null; onImpactChange: () => void;
 }) {
   // Launch-at-login belongs to the installed app, so the row exists only in the
   // desktop window — and only once the shell has confirmed the current state,
@@ -569,14 +779,14 @@ export function SettingsModal({ open, onClose, sound, onSound, scale, onZoom, on
                   <button onClick={onClose} className="ml-auto text-[18px] leading-none px-2 t-dim2 hover:opacity-70">✕</button>
                 </div>
 
-                <div className="flex-1 min-h-0 flex">
+                <div className="flex-1 min-h-0 flex flex-col sm:flex-row">
                   {/* One page per concern instead of one long scroll: four
                       sections stacked vertically meant the shortcuts, the part
                       you come here to change, were always below the fold. */}
-                  <div className="shrink-0 w-[168px] py-2 px-2 flex flex-col gap-0.5 border-r" style={{ borderColor: "color-mix(in srgb, var(--border) 25%, transparent)" }}>
+                  <div className="shrink-0 w-full sm:w-[168px] py-2 px-2 flex flex-row sm:flex-col gap-0.5 overflow-x-auto border-b sm:border-b-0 sm:border-r" style={{ borderColor: "color-mix(in srgb, var(--border) 25%, transparent)" }}>
                     {TABS.map((t) => (
                       <button key={t.id} onClick={() => setPane(t.id)}
-                        className="w-full text-left px-2.5 py-1.5 rounded-lg text-[12px] flex items-center gap-2"
+                        className="shrink-0 sm:w-full text-left px-2.5 py-1.5 rounded-lg text-[12px] flex items-center gap-2"
                         style={pane === t.id
                           ? { background: "color-mix(in srgb, var(--primary) 15%, transparent)", color: "var(--text)" }
                           : { color: "var(--text3)" }}>
@@ -663,6 +873,8 @@ export function SettingsModal({ open, onClose, sound, onSound, scale, onZoom, on
                     )}
                   </Section>
                   )}
+
+                  {pane === "impact" && <ImpactPane impact={impact} onChange={onImpactChange} />}
 
                   {pane === "keys" && (
                   <Section title="Shortcuts">

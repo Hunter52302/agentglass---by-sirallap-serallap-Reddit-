@@ -1,4 +1,4 @@
-// Glasses for Argus — user-defined server-side redline policy.
+// AgentGlass Argus integration — user-defined server-side redline policy.
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md.
 //

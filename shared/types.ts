@@ -1,7 +1,7 @@
 // Shared event + analytics contract between server and web.
 // Keep this file dependency-free so both sides can import it.
 
-// Glasses for Argus: the environment tier's own contract lives in ./env.ts so
+// AgentGlass Argus integration: the environment tier's own contract lives in ./env.ts so
 // this file stays about agent-reported telemetry. Only the WsFrame member and
 // the "env" ViewId reach in here.
 import type { EnvTick } from "./env.ts";
@@ -437,7 +437,7 @@ export type WsFrame =
   /** A UI-navigation command from POST /control, rebroadcast to every client.
    *  It changes what is *shown*, never the fleet. */
   | { type: "control"; data: ControlCmd }
-  /** Glasses for Argus: a COALESCED environment-tier tick — "n things happened,
+  /** AgentGlass Argus integration: a COALESCED environment-tier tick — "n things happened,
    *  most recently at t". Its own frame type (never `event`) because these carry
    *  no session, no tokens and no cost and must never reach the cockpit's stats.
    *

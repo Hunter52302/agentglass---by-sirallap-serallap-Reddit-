@@ -140,9 +140,7 @@ export function Header({
           <Logo size={26} title="agentglass" />
         </motion.span>
         <div className="leading-none pointer-events-none">
-          <div className="text-[16px] font-bold tracking-tight" style={{ color: "var(--text)" }}>
-            agent<span style={{ color: "var(--primary)" }}>glass</span>
-          </div>
+          <div className="text-[16px] font-bold tracking-tight" style={{ color: "var(--text)" }}>agent<span style={{ color: "var(--primary)" }}>glass</span></div>
         </div>
         {/* The project defines what every other number on screen means, so it
             reads as a control in its own right rather than a caption under the

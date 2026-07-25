@@ -121,7 +121,7 @@ export function modelLabelOf(raw: string | null | undefined): string {
 export function providerOf(raw: string | null | undefined): string {
   if (!raw) return "unknown";
   const m = raw.toLowerCase();
-  if (/opus|sonnet|haiku|fable|claude|anthropic/.test(m)) return "Anthropic";
+  if (/opus|sonnet|haiku|fable|mythos|claude|anthropic/.test(m)) return "Anthropic";
   if (/gpt|davinci|openai|\bo1\b|\bo3\b|\bo4\b/.test(m)) return "OpenAI";
   if (/gemini|palm|bison|flash|google|vertex/.test(m)) return "Google";
   if (/deepseek/.test(m)) return "DeepSeek";

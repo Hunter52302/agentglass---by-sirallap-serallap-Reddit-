@@ -1,4 +1,4 @@
-# Glasses for Argus
+# agentglass Argus integration
 
 A local, experimental integration of Argus into AgentGlass. See
 [`ARGUS-IDENTITY.md`](ARGUS-IDENTITY.md) for the controlling product boundary and

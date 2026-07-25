@@ -1,4 +1,4 @@
-// Glasses for Argus — scoped containment.
+// AgentGlass Argus integration — scoped containment.
 //
 // Origin: Argus src/kill.js — MIT © 2026 Zac Rieger. Ported to TypeScript.
 //

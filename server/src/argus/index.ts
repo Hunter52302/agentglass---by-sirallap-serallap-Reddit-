@@ -1,4 +1,4 @@
-// Glasses for Argus — agent runtime integrity, provenance, and intervention.
+// AgentGlass Argus integration — agent runtime integrity, provenance, and intervention.
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md for provenance.
 //

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 /**
  * The app asks its own questions.
@@ -25,7 +26,7 @@ import { join } from "node:path";
  * here got there one convenient call at a time.
  */
 
-const SRC = new URL("../src", import.meta.url).pathname;
+const SRC = fileURLToPath(new URL("../src", import.meta.url));
 const EXTS = [".ts", ".tsx"];
 
 /** `confirm(` / `prompt(` / `alert(` as a bare call — not `foo.confirm(`, not a
