@@ -201,7 +201,7 @@ export function startWatcher(
         }, 40),
       });
     });
-    watcher.on('error', (err: any) => {
+    (watcher as any).on('error', (err: any) => {
       if (err && err.code !== 'EPERM' && err.code !== 'ENOENT') {
         console.error(`[argus/watcher] ${err.code || ''} ${err.message || err}`);
       }

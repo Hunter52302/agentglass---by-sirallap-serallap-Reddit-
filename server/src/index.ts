@@ -715,7 +715,7 @@ const server = Bun.serve<WsData>({
       if (gateId) {
         noteGate(gateId, {
           pid: Number.isInteger(proposedPid) && proposedPid > 1 ? proposedPid : null,
-          rule: rule ? { id: rule.id, description: rule.description, kill: rule.kill } : null,
+          rule: rule ? { id: rule.id, description: rule.description, decision: rule.decision, kill: rule.kill } : null,
           created: Date.now(),
         });
       }

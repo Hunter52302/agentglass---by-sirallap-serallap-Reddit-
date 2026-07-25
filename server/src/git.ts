@@ -10,7 +10,7 @@
 // scoped with `-C <root>`; commit paths are validated to stay inside the repo
 // root; and the whole feature can be killed with AGENTGLASS_COMMIT_DISABLED=1.
 
-import { resolve, dirname, relative, sep } from "node:path";
+import { resolve, dirname, relative, sep, basename } from "node:path";
 // readFileSync: /etc/wsl.conf, for the Windows drive translation below.
 import { readFileSync, statSync } from "node:fs";
 import { inScope, isUnderPath } from "./config.ts";
