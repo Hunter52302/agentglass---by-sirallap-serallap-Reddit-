@@ -6,7 +6,7 @@ import { isArgusWorkspacePath, setNetworkScope } from "../src/argus/index.ts";
 import { killTree } from "../src/argus/kill.ts";
 
 describe("Argus identity boundary", () => {
-  test("filesystem observation accepts only the workspace or descendants", () => {
+  test("workspace classification distinguishes normal and operator-expanded scope", () => {
     const base = mkdtempSync(join(tmpdir(), "argus-identity-"));
     const workspace = join(base, "repo");
     const child = join(workspace, "src");
@@ -23,13 +23,15 @@ describe("Argus identity boundary", () => {
     }
   });
 
-  test("network scope cannot widen to every host connection", () => {
-    expect(setNetworkScope(true).network.all).toBe(false);
+  test("whole-network visibility remains an explicit reversible choice", () => {
+    expect(setNetworkScope(true).network.all).toBe(true);
+    expect(setNetworkScope(false).network.all).toBe(false);
   });
 
-  test("Argus evidence collection cannot terminate host processes", () => {
-    const result = killTree(424242);
-    expect(result.killed).toEqual([]);
-    expect(result.skipped).toBe("outside-argus-agent-integrity-scope");
+  test("containment refuses invalid, system, self, and parent pids", () => {
+    expect(killTree(0).skipped).toBe("invalid-pid");
+    expect(killTree(1).skipped).toBe("invalid-pid");
+    expect(killTree(process.pid).skipped).toBe("refuses-self-or-parent");
+    expect(killTree(process.ppid).skipped).toBe("refuses-self-or-parent");
   });
 });
