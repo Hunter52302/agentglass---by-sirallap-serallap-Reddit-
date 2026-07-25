@@ -62,7 +62,7 @@ import {
 import { generateWalkthrough, WALKTHROUGH_ENABLED } from "./walkthrough.ts";
 import { ptyOpen, ptyMessage, ptyClose, projectCommands, shutdownTerminals, TERMINAL_ENABLED, type PtyWsData } from "./terminal.ts";
 import { chatStream, CHAT_ENABLED, CHAT_BYPASS_ALLOWED } from "./chat.ts";
-// Glasses for Argus — the environment tier. Sees the machine underneath the
+// AgentGlass Argus integration — the environment tier. Sees the machine underneath the
 // agents' self-reports: runtimes present but reporting nothing, outbound AI
 // connections, and (opt-in) unclaimed file writes. Its rows live in their own
 // table and never touch the cockpit's cost/latency/throughput math.
@@ -334,7 +334,7 @@ setGitChangeHook(() => { treeCache.clear(); worktreesCache.clear(); broadcast({ 
 // notification (cross-platform) instead of the Linux-only notify-send.
 setAlertSink({ broadcast: (a) => broadcast({ type: "alert", data: a }), hasClients: () => clients.size > 0 });
 
-// Glasses for Argus: start the environment sensors. Every observation is
+// AgentGlass Argus integration: start the environment sensors. Every observation is
 // persisted to env_events and pushed as its own `env` frame — deliberately not
 // an `event` frame, so nothing here can be mistaken for, or counted as, agent
 // telemetry. The fs tier stays off unless GLASSES_FS_WATCH is set.
@@ -603,7 +603,7 @@ const server = Bun.serve<WsData>({
       } catch {
         return json({ error: "invalid json" }, 400);
       }
-      // Glasses for Argus: the hook volunteers the pid of the agent process
+      // AgentGlass Argus integration: the hook volunteers the pid of the agent process
       // that spawned it. That single fact is what turns the environment tier's
       // "is this VENDOR reporting?" into "is THIS PROCESS reporting?" — nothing
       // in a hook payload otherwise carries a pid, and nothing in the OS process
@@ -714,7 +714,7 @@ const server = Bun.serve<WsData>({
       const ti = b.tool_input ?? {};
       const summary = String(ti.command || ti.file_path || ti.path || ti.pattern || ti.query || ti.description || b.tool_name || "").slice(0, 300);
 
-      // Glasses for Argus — server-side redlines, evaluated BEFORE the gate.
+      // AgentGlass Argus integration — server-side redlines, evaluated BEFORE the gate.
       //
       // Additive only: a rule can escalate a call to an immediate deny+kill, or
       // tag it as it goes into agentglass's gate. It can never allow something
@@ -1222,7 +1222,7 @@ const server = Bun.serve<WsData>({
       return json({ error: "method not allowed" }, 405);
     }
 
-    // --- Glasses for Argus: the environment tier ---
+    // --- AgentGlass Argus integration: the environment tier ---
     // Read-only. Everything here is an observation about the machine, never a
     // claim about an agent, and it is served from env_events so no query in
     // this block can perturb the cockpit's numbers.

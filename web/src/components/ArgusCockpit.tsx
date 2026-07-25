@@ -1,4 +1,4 @@
-// Glasses for Argus — Argus's own cockpit.
+// AgentGlass Argus integration — Argus's own cockpit.
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md at the repo root.
 //
