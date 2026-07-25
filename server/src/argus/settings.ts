@@ -1,12 +1,9 @@
-// Glasses for Argus — persisted scoped-provenance settings.
+// Glasses for Argus — persisted lens settings.
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md.
 //
-// Only the user's opt-in filesystem preference is persisted. The actual path is
-// revalidated against the active AgentGlass workspace every time it is used, so
-// an old setting can never silently widen observation after the workspace moves.
-// Host-wide network expansion is intentionally retained only as a false-valued
-// compatibility field while the identity-3 surface is removed.
+// Persist only choices the operator made deliberately in the Argus UI. Launch
+// environment variables remain authoritative.
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
@@ -21,37 +18,29 @@ export const SETTINGS_PATH = join(
 export interface GlassesSettings {
   fs_enabled?: boolean;
   fs_dir?: string | null;
-  /** Compatibility only. The current foundation always writes false. */
-  network_all?: false;
+  /** False = AI/agent-relevant connections; true = explicit whole-network lens. */
+  network_all?: boolean;
 }
 
 let cache: GlassesSettings | null = null;
 
-function sanitize(value: unknown): GlassesSettings {
-  if (!value || typeof value !== "object") return {};
-  const input = value as Record<string, unknown>;
-  return {
-    fs_enabled: typeof input.fs_enabled === "boolean" ? input.fs_enabled : undefined,
-    fs_dir: typeof input.fs_dir === "string" || input.fs_dir === null ? input.fs_dir : undefined,
-    network_all: false,
-  };
-}
-
 export function readSettings(): GlassesSettings {
   if (cache) return cache;
   try {
-    cache = existsSync(SETTINGS_PATH)
-      ? sanitize(JSON.parse(readFileSync(SETTINGS_PATH, "utf8")))
-      : {};
+    if (existsSync(SETTINGS_PATH)) {
+      const parsed = JSON.parse(readFileSync(SETTINGS_PATH, "utf8"));
+      cache = parsed && typeof parsed === "object" ? parsed : {};
+    } else {
+      cache = {};
+    }
   } catch {
     cache = {};
   }
-  return cache;
+  return cache!;
 }
 
-/** Merge, sanitize, and persist. Never throws into the caller. */
 export function writeSettings(patch: GlassesSettings): GlassesSettings {
-  const next = sanitize({ ...readSettings(), ...patch, network_all: false });
+  const next = { ...readSettings(), ...patch };
   cache = next;
   try {
     mkdirSync(dirname(SETTINGS_PATH), { recursive: true });
