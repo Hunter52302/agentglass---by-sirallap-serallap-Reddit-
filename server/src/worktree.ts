@@ -27,7 +27,7 @@
 // inScope(), and config.ts sits below everything else in the import graph.
 
 import { readFileSync, statSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, resolve, basename } from "node:path";
 
 /**
  * The main repo a linked worktree belongs to — read from its `.git` file, with
@@ -186,5 +186,17 @@ function listWorktrees(root: string): string[] {
  *  user thinks in, but the directory is what disambiguates two checkouts of the
  *  same branch, so callers get the leaf directory name. */
 export function worktreeLabel(path: string): string {
-  return path.split("/").filter(Boolean).pop() ?? path;
+  const trimmed = path.replace(/[\\/]+$/, "");
+  // `basename` is already platform-correct, and on POSIX it deliberately does
+  // NOT treat a backslash as a separator — a directory there really can be
+  // called `we\ird`. Splitting on both unconditionally would mangle that name.
+  const leaf = basename(trimmed);
+  // The one case basename cannot get right off Windows: an unambiguously
+  // Windows path (drive-letter or UNC) read on a Mac, where it returns the
+  // whole string. `split("/")` alone had that bug on Windows itself, labelling
+  // every worktree with its full path instead of its leaf directory.
+  if (leaf === trimmed && /^([A-Za-z]:[\\/]|\\\\)/.test(trimmed)) {
+    return trimmed.split(/[\\/]/).filter(Boolean).pop() ?? trimmed;
+  }
+  return leaf || path;
 }

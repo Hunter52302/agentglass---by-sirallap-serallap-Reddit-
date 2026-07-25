@@ -173,7 +173,22 @@ export function workspaceRoot(): string | null {
  * Compare on a normalised form instead, so either spelling of the same location
  * answers the same way.
  */
-const normSep = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+/**
+ * A backslash is only a separator where it IS one.
+ *
+ * On Windows, `\` and `/` are interchangeable. On macOS and Linux a backslash
+ * is an ordinary, legal character in a filename — a directory really can be
+ * called `we\ird`, and rewriting it to `we/ird` would invent a level of nesting
+ * that does not exist and could report an unrelated path as "inside" a scope.
+ *
+ * So the rewrite is applied on Windows, or to a string that is unambiguously a
+ * Windows path (drive-letter or UNC) wherever it is seen — which is the case
+ * that actually matters off Windows, since a transcript recorded on Windows can
+ * be read on a Mac.
+ */
+const WINDOWSISH = /^([A-Za-z]:[\\/]|\\\\)/;
+const normSep = (p: string) =>
+  (process.platform === "win32" || WINDOWSISH.test(p) ? p.replace(/\\/g, "/") : p).replace(/\/+$/, "");
 
 export function isUnderPath(child: string, parent: string): boolean {
   const c = normSep(child);

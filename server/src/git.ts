@@ -283,15 +283,26 @@ export async function repoRootOfAsync(anchor: string): Promise<string | null> {
 export function projectRootOf(anchor: string): string | null {
   const abs = safeAbs(anchor);
   if (!abs) return null;
-  const wt = abs.indexOf("/.worktrees/");
+  // Searched on a slash-normalised copy: `abs` comes from resolve(), which is
+  // backslashed on Windows, so the literal "/.worktrees/" never matched there
+  // and the strip silently never happened — every session in a `.worktrees/`
+  // layout was attributed to the worktree instead of the project that owns it.
+  // The replace is 1:1, so the index is still valid against the original.
+  const wt = abs.replace(/\\/g, "/").indexOf("/.worktrees/");
   const base = wt === -1 ? abs : abs.slice(0, wt);
   let dir = base;
   try { if (!statSync(base).isDirectory()) dir = dirname(base); } catch { dir = dirname(base); }
   const r = git(dir, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
   if (r.code === 0) {
+    // git answers with forward slashes on Windows; resolve() puts it back into
+    // the platform's own spelling so the value we return compares equal to
+    // paths built anywhere else. `basename` rather than endsWith("/.git") for
+    // the same reason — the separator in git's answer is not ours.
     const common = r.stdout.trim();
-    if (common.endsWith("/.git")) return dirname(common);
-    if (common) return common;
+    if (common) {
+      const nativeCommon = resolve(common);
+      return basename(nativeCommon) === ".git" ? dirname(nativeCommon) : nativeCommon;
+    }
   }
   // Not a repo (or gone): the worktree strip is still a better answer than the
   // raw path, but a plain non-repo directory has no project to roll up to.
