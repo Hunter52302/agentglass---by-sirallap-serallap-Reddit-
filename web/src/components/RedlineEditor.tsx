@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Portal } from "./Portal.tsx";
+import { useDialogs } from "./ConfirmDialog.tsx";
 import { SERVER, authHeaders } from "../lib/api.ts";
 
 type Decision = "flag" | "gate" | "kill";
@@ -80,6 +81,7 @@ export function RedlineEditor({ open, onClose, onSaved }: {
   onClose: () => void;
   onSaved?: () => void;
 }) {
+  const { ask, dialog } = useDialogs();
   const [status, setStatus] = useState<Status | null>(null);
   const [draft, setDraft] = useState<Draft>(EMPTY);
   const [editing, setEditing] = useState<string | null>(null);
@@ -139,7 +141,12 @@ export function RedlineEditor({ open, onClose, onSaved }: {
   };
 
   const remove = async (id: string) => {
-    if (busy || !confirm(`Remove redline “${id}”?`)) return;
+    if (busy || !(await ask({
+      title: `Remove redline “${id}”?`,
+      body: "This deletes the operator-owned policy rule.",
+      confirmLabel: "Remove",
+      danger: true,
+    }))) return;
     setBusy(true);
     try {
       await post("/env/redlines/delete", { id });
@@ -175,6 +182,7 @@ export function RedlineEditor({ open, onClose, onSaved }: {
   if (!open) return null;
 
   return (
+    <>
     <Portal>
       <div className="fixed inset-0 z-[80] flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,.58)" }}>
         <div className="w-full max-w-[1050px] max-h-[92vh] overflow-hidden rounded-xl border flex flex-col"
@@ -272,5 +280,7 @@ export function RedlineEditor({ open, onClose, onSaved }: {
         </div>
       </div>
     </Portal>
+    {dialog}
+    </>
   );
 }

@@ -30,6 +30,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Portal } from "./Portal.tsx";
+import { useDialogs } from "./ConfirmDialog.tsx";
 import { usePoll } from "../lib/usePoll.ts";
 import { api } from "../lib/api.ts";
 import type {
@@ -123,6 +124,7 @@ function Toggle({ on, label, title, onClick }: { on: boolean; label: string; tit
 }
 
 export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const { ask, dialog } = useDialogs();
   const [status, setStatus] = useState<EnvTierStatus | null>(null);
   const [summary, setSummary] = useState<EnvSummary | null>(null);
   const [lanes, setLanes] = useState<ActorLane[]>([]);
@@ -221,6 +223,16 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
     } finally { setBusy(false); }
   };
 
+  const confirmDenyAndKill = async (id: string, pid: number) => {
+    const approved = await ask({
+      title: `Deny and force-stop pid ${pid}?`,
+      body: "Every process under this PID will also stop. This is irreversible.",
+      confirmLabel: "Deny & kill",
+      danger: true,
+    });
+    if (approved) await denyAndKill(id);
+  };
+
   const decide = async (id: string, d: "allow" | "deny") => {
     if (busy) return;
     setBusy(true);
@@ -230,6 +242,7 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
   if (!open) return null;
 
   return (
+    <>
     <Portal>
       <div className="fixed inset-0 z-[60] flex flex-col" style={{ background: "var(--bg)" }}>
         {/* ── header: the lens, and the controls that move it ── */}
@@ -408,7 +421,7 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
                           so it confirms, and it only appears when the hook told
                           us a pid — otherwise there is nothing to stop. */}
                       <button
-                        onClick={() => { if (confirm(`Deny AND force-stop pid ${k?.pid} and every process under it?\n\nThis is irreversible.`)) void denyAndKill(g.id); }}
+                        onClick={() => { if (k) void confirmDenyAndKill(g.id, k.pid); }}
                         disabled={busy || !k}
                         title={k ? `Stops pid ${k.pid} and its children` : "This request carries no pid — nothing to kill"}
                         className="px-2 py-0.5 rounded text-[10px] transition-opacity hover:opacity-80 disabled:opacity-30"
@@ -643,5 +656,7 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
         </div>
       </div>
     </Portal>
+    {dialog}
+    </>
   );
 }
