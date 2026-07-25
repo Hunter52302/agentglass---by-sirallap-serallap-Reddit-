@@ -11,7 +11,10 @@ describe("priceFor", () => {
     expect(priceFor("claude-3-5-haiku-latest")?.label).toBe("Haiku");
   });
 
-  test("premium Claude tiers keep their distinct first-match rates", () => {
+  test("the premium Claude tiers are priced apart from Opus", () => {
+    // Both are $10/$50 rather than Opus's $5/$25, and neither name contains
+    // "opus"/"sonnet"/"haiku", so a missing row would silently fall through to
+    // DEFAULT_PRICE and under-report the cost by ~3x rather than fail.
     expect(priceFor("claude-fable-5")?.label).toBe("Fable");
     expect(priceFor("claude-mythos-5")?.label).toBe("Mythos");
     expect(priceFor("claude-mythos-5")?.input).toBe(10);

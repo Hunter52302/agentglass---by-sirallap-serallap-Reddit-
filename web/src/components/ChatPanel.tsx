@@ -32,8 +32,16 @@ import {
 import { useSidebarWidth } from "../lib/sidebarWidth.ts";
 import { SidebarGrip } from "./SidebarGrip.tsx";
 
-// Still hand-maintained. The suffix remains provider-facing model-selection
-// input; every local context display resolves its ceiling through ctxLimitOf.
+// Still hand-maintained, and still drifts every release — the runtime-sourced
+// list is its own job.
+//
+// The `· 1M` entry no longer changes what this app measures: `ctxLimitOf`
+// knows Opus 5 is a 1M model, so the plain id and the suffixed one resolve to
+// the same ceiling. It stays because the suffix is not ours to interpret — it
+// is what `claude` reads to pick a window behind an LLM gateway or on Bedrock
+// / Vertex / Foundry, where the plain id really does mean 200k. Locally the
+// two entries are the same choice; for someone pointed at a provider they are
+// not, and only they can tell which.
 const MODELS = [
   { id: "claude-fable-5", label: "Fable 5" },
   { id: "claude-opus-5", label: "Opus 5" },
