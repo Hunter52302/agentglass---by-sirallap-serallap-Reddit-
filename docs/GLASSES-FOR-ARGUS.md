@@ -376,9 +376,41 @@ GitHub uses an underscore.
 `server/test/preload.ts` now binds a sandbox database, config dir and projects
 dir before any module can load `db.ts` — no test can reach real data again.
 
-Suite: **602 tests across 73 files — 570 pass, 32 skip, 0 fail.** The skips are
-by capability and by name (Linux `/proc`, POSIX-only self-update, WSL automount
-translation, `#!/bin/sh` shims, symlinks needing Developer Mode), never silent.
+## Verified on both platforms, not just reasoned about
+
+The suite was run on Windows *and* on Linux (Ubuntu 26.04 under WSL2, Bun 1.3.14
+— the same Bun version, so the comparison is like-for-like), from a clean LF
+checkout rather than a copy of the Windows working tree.
+
+| | Windows | Linux |
+|---|---|---|
+| pass | 585 | **617** |
+| skip | 32 | **0** |
+| fail | 0 | 0 |
+
+`585 + 32 = 617` exactly. **Every test skipped on Windows runs and passes on
+Linux** — install-stop 10, selfupdate 15, the three WSL-automount security
+cases, the two docker `#!/bin/sh` shims, and the two symlink cases. That is the
+evidence that the skips are correctly scoped rather than a way of hiding
+failures, and that the cross-platform fixes did not trade Windows correctness
+for POSIX correctness.
+
+Also verified on Linux: `tsc --noEmit` clean, the server boots and reports
+`platform: "linux"` with the environment tier running, and the Linux process
+scanner (`ps -ww -axo`) finds runtimes by signature.
+
+### The one thing WSL cannot verify
+
+Under WSL2 the **network tier reports nothing** — not a bug in it. WSL
+virtualizes networking through the Windows host, so the Linux socket table is
+empty even while a connection is open: `lsof`, `ss` and `/proc/net/tcp` all show
+zero established sockets during a live download. The parser is verified against
+known `lsof` output, and the tier works natively on macOS and Linux; under WSL,
+run it from the Windows side.
+
+Suite: **617 tests across 74 files.** The Windows skips are by capability and by
+name (Linux `/proc`, POSIX-only self-update, WSL automount translation,
+`#!/bin/sh` shims, symlinks needing Developer Mode), never silent.
 
 ## Known limits
 

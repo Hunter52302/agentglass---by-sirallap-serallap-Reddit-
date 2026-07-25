@@ -105,6 +105,12 @@ async function defaultScan(): Promise<Conn[]> {
   } catch {
     return []; // an ss-based Linux fallback can be added as its own adapter
   }
+  // WSL is the one place this reliably returns nothing, and it is not worth a
+  // fallback: WSL2 virtualizes networking through the Windows host, so the
+  // Linux socket table is genuinely empty — `lsof`, `ss` and `/proc/net/tcp`
+  // all report zero established sockets while a download is in flight. There is
+  // nothing there to read by any means. Run the tier from the Windows side on
+  // such a machine; native Linux and macOS are unaffected.
 }
 
 export interface Relevance {
