@@ -10,7 +10,8 @@ process.env.XDG_CONFIG_HOME = dir;
 const { db } = await import("../src/db.ts");
 const { insertEnvEvent } = await import("../src/argus/store.ts");
 const { isKnownPath } = await import("../src/argus/reveal.ts");
-const { compareMapNodes } = await import("../src/argus/map.ts");
+const { buildMap, compareMapNodes } = await import("../src/argus/map.ts");
+const { setFsWatch } = await import("../src/argus/index.ts");
 
 function observed(path: string) {
   insertEnvEvent({
@@ -60,5 +61,13 @@ describe("map layout", () => {
     const reverse = [...nodes].reverse().sort(compareMapNodes).map((n) => n.name);
     expect(forward).toEqual(["alpha", "beta", "a.ts", "z.ts"]);
     expect(reverse).toEqual(forward);
+  });
+
+  test("reports the live filesystem-lens state", async () => {
+    expect(buildMap().fs_tier_enabled).toBe(false);
+    await setFsWatch({ enabled: true, dir });
+    expect(buildMap().fs_tier_enabled).toBe(true);
+    await setFsWatch({ enabled: false });
+    expect(buildMap().fs_tier_enabled).toBe(false);
   });
 });

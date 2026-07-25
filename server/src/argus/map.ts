@@ -25,7 +25,7 @@
 
 import { db, scopeClause } from "../db.ts";
 import { normalizePath } from "./paths";
-import { FS_WATCH } from "./index";
+import { envTierStatus } from "./index";
 
 /** How close in time a disk write has to be to a tool call to be considered
  *  the same act. Argus uses 2s; a little slack covers a slow flush without
@@ -288,7 +288,7 @@ export function buildMap({ limit = 600, nodeCap = 400 }: { limit?: number; nodeC
     agents: [...agentMap.values()].sort((a, b) => b.last_ts - a.last_ts),
     truncated,
     total_nodes: out.length,
-    fs_tier_enabled: FS_WATCH,
+    fs_tier_enabled: envTierStatus().file.enabled,
     unclaimed_total: unclaimedTotal,
   };
 }
