@@ -17,6 +17,8 @@ import { Kpis } from "./components/Kpis.tsx";
 import { Throughput } from "./components/Throughput.tsx";
 import { ToolMix } from "./components/ToolMix.tsx";
 import { Radar } from "./components/Radar.tsx";
+import { Environment } from "./components/Environment.tsx";
+import { ArgusCockpit } from "./components/ArgusCockpit.tsx";
 import { Alerts } from "./components/Alerts.tsx";
 import { Fleet } from "./components/Fleet.tsx";
 import { Feed } from "./components/Feed.tsx";
@@ -100,6 +102,8 @@ export default function App() {
   // survives closing — reopening lands you where you left off, because
   // switching views is the thing you do constantly.
   const [wsOpen, setWsOpen] = useState(false);
+  // Argus gets its own surface rather than a tab — see ArgusCockpit.tsx.
+  const [argusOpen, setArgusOpen] = useState(false);
   const [wsView, setWsView] = useState<ViewId>(loadLastView);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [chatFocus, setChatFocus] = useState<string | undefined>(undefined);
@@ -508,6 +512,7 @@ export default function App() {
         onClear={clearFilters}
         showUsage={showUsage}
         workspace={workspace}
+        onOpenArgus={() => setArgusOpen(true)}
         onOpenProject={() => setProjectOpen(true)}
       />
 
@@ -535,8 +540,13 @@ export default function App() {
             </div>
           </div>
 
-          <div className="xl:col-span-3 min-w-0 min-h-0 grid grid-rows-[3fr_2fr] gap-3 h-[420px] xl:h-[520px] tall:h-auto">
+          {/* Radar / Environment / Alerts. The environment panel earns a slot on
+              the watching surface because the runtimes it counts are invisible
+              to every other widget here — they report nothing, so the fleet,
+              the radar and the feed all score them as zero. */}
+          <div className="xl:col-span-3 min-w-0 min-h-0 grid grid-rows-[3fr_2fr_2fr] gap-3 h-[420px] xl:h-[520px] tall:h-auto">
             <Radar agents={agents} onSelect={(a) => setFilter((f) => ({ ...f, app: a.source_app }))} />
+            <Environment onOpen={() => setArgusOpen(true)} />
             <Alerts alerts={alerts} agents={agents} onSelectApp={(app) => setFilter((f) => ({ ...f, app }))} />
           </div>
         </div>
@@ -557,6 +567,7 @@ export default function App() {
       <EventModal event={selected} onClose={() => setSelected(null)} />
       <StatsModal open={statsOpen} onClose={() => setStatsOpen(false)} stats={stats} windowMs={windowMs} />
       <SkillsModal open={skillsOpen} onClose={() => setSkillsOpen(false)} />
+      <ArgusCockpit open={argusOpen} onClose={() => setArgusOpen(false)} />
       <Workspace open={wsOpen} view={wsView} onView={setWsView} onClose={closeWorkspace} onSkills={() => setSkillsOpen(true)} chatFocusId={chatFocus} />
       <SearchModal open={searchOpen} onClose={() => setSearchOpen(false)} onSelectApp={(app) => setFilter((f) => ({ ...f, app }))} />
       {/* Shows once when the app first runs a version it has not run before —

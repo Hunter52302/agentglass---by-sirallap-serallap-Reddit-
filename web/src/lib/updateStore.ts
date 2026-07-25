@@ -54,12 +54,18 @@ export function subscribeUpdate(fn: () => void): () => void {
  * true.
  */
 const ANNOUNCED_KEY = "agentglass_update_announced";
+let announcedInMemory: string | null = null;
 
 function announced(): string {
-  try { return localStorage.getItem(ANNOUNCED_KEY) || ""; } catch { return ""; }
+  if (announcedInMemory) return announcedInMemory;
+  try {
+    announcedInMemory = localStorage.getItem(ANNOUNCED_KEY) || null;
+    return announcedInMemory || "";
+  } catch { return ""; }
 }
 
 function remember(tag: string): void {
+  announcedInMemory = tag;
   try { localStorage.setItem(ANNOUNCED_KEY, tag); } catch { /* private mode */ }
 }
 
@@ -128,6 +134,7 @@ if (typeof window !== "undefined") startUpdateChecks();
 /** Test seam: forget everything this module remembers. */
 export function __resetUpdateStore(): void {
   snapshot = null;
+  announcedInMemory = null;
   if (timer) { clearInterval(timer); timer = null; }
   try { localStorage.removeItem(ANNOUNCED_KEY); } catch { /* fine */ }
 }

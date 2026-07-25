@@ -18,7 +18,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { safeAbs } from "./git.ts";
-import { inScope } from "./config.ts";
+import { inScope, isUnderPath } from "./config.ts";
 
 export const EDITOR_ENABLED = process.env.AGENTGLASS_EDITOR_DISABLED !== "1";
 
@@ -128,7 +128,7 @@ async function socketFor(absPath: string): Promise<{ sock: string | null; otherC
     const cwd = cwds[i];
     if (!cwd) { stuck++; continue; } // dead or wedged — left behind by a crash
     // The editor actually rooted in this checkout always wins.
-    if (absPath === cwd || absPath.startsWith(cwd.replace(/\/$/, "") + "/")) {
+    if (isUnderPath(absPath, cwd)) {
       return { sock: socks[i], otherCwds, stuck, viaFamily: null };
     }
     // Otherwise remember it if it is the same project by another checkout: one

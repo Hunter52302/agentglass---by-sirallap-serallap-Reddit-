@@ -23,7 +23,7 @@ import { maybeAlert, setAlertSink } from "./alerts.ts";
 import { getSkills, catalogMarkdown, catalogCsv } from "./skills.ts";
 import { getInsights } from "./insights.ts";
 import { getUsage } from "./usage.ts";
-import { submitGate, decideGate, pendingGates, awaitGate, restoreGates, GATE_MAX_MS } from "./gate.ts";
+import { submitGate, decideGate, pendingGates, awaitGate, restoreGates, shutdownGates, GATE_MAX_MS } from "./gate.ts";
 import { parseControlCmd } from "./control.ts";
 import { otlpTracesToEvents, otlpLogsToEvents } from "./otlp.ts";
 import { decodeOtlpTraces, decodeOtlpLogs } from "./otlp_pb.ts";
@@ -58,6 +58,22 @@ import {
 import { generateWalkthrough, WALKTHROUGH_ENABLED } from "./walkthrough.ts";
 import { ptyOpen, ptyMessage, ptyClose, projectCommands, shutdownTerminals, TERMINAL_ENABLED, type PtyWsData } from "./terminal.ts";
 import { chatStream, CHAT_ENABLED, CHAT_BYPASS_ALLOWED } from "./chat.ts";
+// Glasses for Argus — the environment tier. Sees the machine underneath the
+// agents' self-reports: runtimes present but reporting nothing, outbound AI
+// connections, and (opt-in) unclaimed file writes. Its rows live in their own
+// table and never touch the cockpit's cost/latency/throughput math.
+import { startEnvTier, envTierStatus, setFsWatch, setNetworkScope } from "./argus/index.ts";
+import {
+  recentEnvEvents, currentRuntimes, currentConnections, recentFileActivity, envSummary,
+  actorLanes, suspectRollup, replayBounds, replayAt, ptyShells, insertEnvEvent,
+  noteAgentPid, pruneAgentPids,
+} from "./argus/store.ts";
+import { buildMap } from "./argus/map.ts";
+import { revealPath, REVEAL_ENABLED } from "./argus/reveal.ts";
+import {
+  evaluate as evaluateRedline, noteGate, gateExtra, killGate, killableGates,
+  redlineStatus, reloadRedlines, upsertRedline, deleteRedline, killTree,
+} from "./argus/redlines.ts";
 import { startScanner, ownsSession, knownProjects, resyncScope, SCAN_ENABLED } from "./transcripts.ts";
 import { workspaceRoot, setWorkspaceRoot, inScope, CONFIG_PATH } from "./config.ts";
 import { hookStatus, applyHooks } from "./hooksetup.ts";
@@ -314,6 +330,44 @@ setGitChangeHook(() => { treeCache.clear(); worktreesCache.clear(); broadcast({ 
 // notification (cross-platform) instead of the Linux-only notify-send.
 setAlertSink({ broadcast: (a) => broadcast({ type: "alert", data: a }), hasClients: () => clients.size > 0 });
 
+// Glasses for Argus: start the environment sensors. Every observation is
+// persisted to env_events and pushed as its own `env` frame — deliberately not
+// an `event` frame, so nothing here can be mistaken for, or counted as, agent
+// telemetry. The fs tier stays off unless GLASSES_FS_WATCH is set.
+// Coalesce the environment tier's output into at most one tick a second.
+//
+// Per-row broadcast put a frame on the wire for every observation. With the
+// filesystem tier on, one `npm install` is thousands of writes a second — each
+// serialized and fanned out to every client, on the same hot path as agent
+// ingest, for rows no view ever read. The tick says something moved; panels
+// re-read what they show.
+const ENV_TICK_MS = 1000;
+let envPending: { count: number; last_ts: number; tiers: Record<string, number> } | null = null;
+let envTickTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushEnvTick() {
+  envTickTimer = null;
+  if (!envPending) return;
+  const tick = envPending;
+  envPending = null;
+  broadcast({ type: "env", data: tick });
+}
+
+const envTier = startEnvTier({
+  onEvent: (e) => {
+    if (!envPending) envPending = { count: 0, last_ts: 0, tiers: {} };
+    envPending.count++;
+    if (e.ts > envPending.last_ts) envPending.last_ts = e.ts;
+    envPending.tiers[e.tier] = (envPending.tiers[e.tier] ?? 0) + 1;
+    if (!envTickTimer) {
+      envTickTimer = setTimeout(flushEnvTick, ENV_TICK_MS);
+      (envTickTimer as any).unref?.();
+    }
+  },
+  fsDir: workspaceRoot(),
+  retentionDays: RETENTION_DAYS,
+});
+
 /**
  * Session detail, held briefly, and invalidated when the session gets an event.
  *
@@ -545,6 +599,14 @@ const server = Bun.serve<WsData>({
       } catch {
         return json({ error: "invalid json" }, 400);
       }
+      // Glasses for Argus: the hook volunteers the pid of the agent process
+      // that spawned it. That single fact is what turns the environment tier's
+      // "is this VENDOR reporting?" into "is THIS PROCESS reporting?" — nothing
+      // in a hook payload otherwise carries a pid, and nothing in the OS process
+      // table carries a session id. Optional and ignored by upstream's ingest.
+      if ((body as any)?.pid != null && body?.session_id) {
+        noteAgentPid((body as any).pid, body.session_id, body.source_app);
+      }
       if (!body?.source_app || !body?.session_id || !body?.hook_event_type) {
         return json({ error: "source_app, session_id, hook_event_type required" }, 400);
       }
@@ -647,6 +709,35 @@ const server = Bun.serve<WsData>({
       try { b = await req.json(); } catch { return json({ decision: "allow", reason: "bad request" }); }
       const ti = b.tool_input ?? {};
       const summary = String(ti.command || ti.file_path || ti.path || ti.pattern || ti.query || ti.description || b.tool_name || "").slice(0, 300);
+
+      // Glasses for Argus — server-side redlines, evaluated BEFORE the gate.
+      //
+      // Additive only: a rule can escalate a call to an immediate deny+kill, or
+      // tag it as it goes into agentglass's gate. It can never allow something
+      // the gate would otherwise have held, so a project already using /gate
+      // keeps its exact behaviour.
+      const gateId = typeof b.id === "string" ? b.id : undefined;
+      const proposedPid = Number(b.pid);
+      const rule = evaluateRedline({ action: String(b.tool_name || ""), target: summary });
+      if (gateId) {
+        noteGate(gateId, {
+          pid: Number.isInteger(proposedPid) && proposedPid > 1 ? proposedPid : null,
+          rule: rule ? { id: rule.id, description: rule.description, decision: rule.decision, kill: rule.kill } : null,
+          created: Date.now(),
+        });
+      }
+      if (rule?.kill) {
+        // The rule opted into stopping the actor outright. No human wait — that
+        // is the entire point of `"kill": true`, and it is why it is opt-in.
+        const killed = killTree(Number.isInteger(proposedPid) ? proposedPid : null);
+        console.error(`[argus/redlines] kill-on-match "${rule.id}" → ${JSON.stringify(killed)}`);
+        return json({
+          decision: "deny",
+          reason: `Argus redline "${rule.id}" (${rule.description}) — denied and process stopped`,
+          killed,
+        });
+      }
+
       const decision = await submitGate(
         // The hook picks the id so it can re-attach to this exact request after
         // a dropped connection (see /gate/status). Shape-checked in gate.ts;
@@ -1102,6 +1193,163 @@ const server = Bun.serve<WsData>({
       return json({ ...statsSummary(windowMs, url.searchParams.get("provider") || undefined), server_started_at: STARTED_AT });
     }
 
+    // --- Glasses for Argus: the environment tier ---
+    // Read-only. Everything here is an observation about the machine, never a
+    // claim about an agent, and it is served from env_events so no query in
+    // this block can perturb the cockpit's numbers.
+    // Live tier control. Argus let you move the lens while it ran; needing a
+    // server restart to answer "what is touching my files?" kills the loop that
+    // makes this worth having. Same CSRF guard as every other mutating route.
+    if (pathname === "/env/watch" && req.method === "POST") {
+      if (!localOrigin(req)) return csrfBlocked();
+      let b: any = {};
+      try { b = await req.json(); } catch { return json({ ok: false, error: "invalid json" }, 400); }
+      const st = await setFsWatch({
+        enabled: b.enabled !== false,
+        dir: b.dir == null ? null : String(b.dir),
+      });
+      return json({ ok: true, status: st });
+    }
+    if (pathname === "/env/scope" && req.method === "POST") {
+      if (!localOrigin(req)) return csrfBlocked();
+      let b: any = {};
+      try { b = await req.json(); } catch { return json({ ok: false, error: "invalid json" }, 400); }
+      return json({ ok: true, status: setNetworkScope(!!b.all) });
+    }
+
+    // Redlines: the policy layer agentglass's gate has no notion of, plus the
+    // escalation it cannot perform. `deny & kill` refuses the action AND stops
+    // the process tree — a denial alone leaves a runaway free to try the next
+    // thing. Irreversible, so it is always an explicit click or an opt-in rule.
+    if (pathname === "/env/redlines") return json(redlineStatus());
+    if (pathname === "/env/redlines/reload" && req.method === "POST") {
+      if (!localOrigin(req)) return csrfBlocked();
+      reloadRedlines(workspaceRoot());
+      return json({ ok: true, ...redlineStatus() });
+    }
+    if (pathname === "/env/redlines/upsert" && req.method === "POST") {
+      if (!localOrigin(req)) return csrfBlocked();
+      let b: any = {};
+      try { b = await req.json(); } catch { return json({ ok: false, error: "invalid json" }, 400); }
+      try {
+        return json({ ok: true, ...upsertRedline(b, workspaceRoot()) });
+      } catch (e: any) {
+        return json({ ok: false, error: e?.message ?? String(e) }, 400);
+      }
+    }
+    if (pathname === "/env/redlines/delete" && req.method === "POST") {
+      if (!localOrigin(req)) return csrfBlocked();
+      let b: any = {};
+      try { b = await req.json(); } catch { return json({ ok: false, error: "invalid json" }, 400); }
+      const id = String(b.id || "").trim();
+      if (!id) return json({ ok: false, error: "id required" }, 400);
+      return json({ ok: true, ...deleteRedline(id, workspaceRoot()) });
+    }
+    if (pathname === "/env/gate/killable") return json(killableGates());
+    if (pathname === "/env/gate/kill" && req.method === "POST") {
+      if (!localOrigin(req)) return csrfBlocked();
+      let b: any = {};
+      try { b = await req.json(); } catch { return json({ ok: false, error: "invalid json" }, 400); }
+      const id = String(b.id || "");
+      const extra = gateExtra(id);
+      if (!extra) return json({ ok: false, error: "unknown or already-resolved gate" }, 404);
+      if (extra.pid == null) {
+        return json({ ok: false, error: "this request carries no pid — nothing to kill" }, 400);
+      }
+      // Deny first, then kill: the held hook gets a real answer even if the
+      // kill fails, rather than hanging until its own timeout.
+      const denied = decideGate(id, "deny", "denied and process stopped from the Argus cockpit");
+      const killed = killGate(id);
+      return json({ ok: true, denied, killed });
+    }
+
+    // Replay: state at an instant, folded from the append-only table.
+    if (pathname === "/env/replay/bounds") return json(replayBounds());
+    if (pathname === "/env/replay") {
+      const at = Number(url.searchParams.get("at"));
+      if (!Number.isFinite(at)) return json({ error: "at (epoch ms) required" }, 400);
+      return json(replayAt(at, Math.min(3_600_000, Number(url.searchParams.get("window")) || 60_000)));
+    }
+
+    // ── recorded shells ──────────────────────────────────────────────────
+    // The one thing agentglass's terminal panel cannot do: capture a shell it
+    // did not launch. The panel spawns its PTY from the browser; this accepts
+    // bytes from a recorder the operator attached to a terminal they were
+    // already in — including one over SSH on another machine.
+    //
+    // Intake, so it is deliberately NOT behind the CSRF origin check (same
+    // reasoning as /ingest and the OTLP sinks): the poster is a local CLI, not
+    // a browser, and has no Origin to present.
+    if (pathname === "/env/pty" && req.method === "POST") {
+      let b: any = {};
+      try { b = await req.json(); } catch { return json({ ok: false, error: "invalid json" }, 400); }
+      const agent = String(b.agent || "shell").slice(0, 120);
+      const end = b.end === true;
+      insertEnvEvent({
+        ts: Number(b.ts) || Date.now(),
+        tier: "pty",
+        action: end ? "pty_end" : "pty_chunk",
+        target: agent,
+        node_id: `pty:${agent}`,
+        parent_node_id: b.parent ? `pty:${String(b.parent)}` : null,
+        pid: Number.isInteger(Number(b.pid)) ? Number(b.pid) : null,
+        ppid: null,
+        runtime: null, provider: null, runtime_kind: null,
+        process_name: null, remote_host: null, remote_ip: null, remote_port: null,
+        path: null,
+        fidelity: "pty_recorded",
+        attributed: 0,
+        detail: {
+          chunk_b64: typeof b.chunk_b64 === "string" ? b.chunk_b64.slice(0, 400_000) : "",
+          seq: Number(b.seq) || 0,
+          command: String(b.command || "").slice(0, 400),
+          host: b.host ? String(b.host).slice(0, 120) : null,
+        },
+      });
+      return json({ ok: true });
+    }
+    if (pathname === "/env/shells") {
+      return json(ptyShells(Math.min(40, Number(url.searchParams.get("limit")) || 12)));
+    }
+
+    // Reveal a node in the OS file manager. Guarded by an allowlist of paths
+    // the tier has actually observed — see argus/reveal.ts for why inScope()
+    // is the wrong guard for a machine-wide view.
+    if (pathname === "/env/reveal" && req.method === "POST") {
+      if (!localOrigin(req)) return csrfBlocked();
+      let b: any = {};
+      try { b = await req.json(); } catch { return json({ ok: false, error: "invalid json" }, 400); }
+      const res = revealPath(b.path);
+      return json(res, res.ok ? 200 : 400);
+    }
+
+    if (pathname === "/env/status") return json(envTierStatus());
+    if (pathname === "/env/lanes") {
+      return json(actorLanes(Math.min(86_400_000, Number(url.searchParams.get("window")) || 3_600_000)));
+    }
+    if (pathname === "/env/suspect") {
+      return json(suspectRollup(Math.min(86_400_000, Number(url.searchParams.get("window")) || 3_600_000)));
+    }
+    if (pathname === "/env/summary") return json(envSummary());
+    if (pathname === "/env/runtimes") return json(currentRuntimes());
+    if (pathname === "/env/connections") {
+      return json(currentConnections(Math.min(500, Number(url.searchParams.get("limit")) || 100)));
+    }
+    if (pathname === "/env/files") {
+      return json(recentFileActivity(Math.min(500, Number(url.searchParams.get("limit")) || 100)));
+    }
+    // The filesystem map: agentglass's labeled tool calls and Argus's unclaimed
+    // writes on one tree. Both halves, which neither side has alone.
+    if (pathname === "/env/map") {
+      return json(buildMap({ limit: Math.min(2000, Number(url.searchParams.get("limit")) || 600) }));
+    }
+    if (pathname === "/env/recent") {
+      const tier = url.searchParams.get("tier");
+      const valid = tier === "process" || tier === "network" || tier === "file";
+      const limit = Math.min(1000, Number(url.searchParams.get("limit")) || 200);
+      return json(recentEnvEvents(limit, valid ? tier : undefined));
+    }
+
     // --- export ---
     if (pathname === "/export") {
       const fmt = url.searchParams.get("format") || "json";
@@ -1308,7 +1556,7 @@ if (gates.restored || gates.expired) {
 // Hang up shells and clean temp dirs on the way out — a bare kill leaves them
 // orphaned. Re-raise so the default disposition still terminates the process.
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
-  process.on(sig, () => { shutdownTerminals(); process.exit(0); });
+  process.on(sig, () => { shutdownTerminals(); shutdownGates(); process.exit(0); });
 }
 
 // Parent-death watchdog: a server must never outlive whoever launched it.
@@ -1342,6 +1590,7 @@ if (process.env.AGENTGLASS_DIE_WITH_PARENT === "1") {
   setInterval(() => {
     if (process.ppid === 1 || process.ppid !== bornUnder || !alive(bornUnder)) {
       shutdownTerminals();
+      shutdownGates();
       process.exit(0);
     }
   }, 3000).unref?.();

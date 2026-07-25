@@ -9,7 +9,7 @@ import type {
   DockerContainer, DockerStat, DockerImage, DockerVolume, DockerNetwork,
   DockerOverview, DockerScope, DockerActionResult, DockerCapability,
 } from "../../shared/types.ts";
-import { workspaceRoot, scopeRoots } from "./config.ts";
+import { workspaceRoot, scopeRoots, isUnderPath } from "./config.ts";
 import { backoff, currentLabel, resumedAs } from "./loopwatch.ts";
 import { withSpawnSlot } from "./spawnpool.ts";
 
@@ -283,7 +283,8 @@ const WORKING_DIR_LABEL = "com.docker.compose.project.working_dir";
 const normalizeProject = (s: string) => s.toLowerCase().replace(/[^a-z0-9_-]/g, "");
 
 export interface DockerScopeKey { dir: string; project: string }
-const trimSlash = (p: string) => p.replace(/\/+$/, "");
+// Trims EITHER separator: a Windows scope root ends in a backslash.
+const trimSlash = (p: string) => p.replace(/[\\/]+$/, "");
 
 /** The open project expressed the way container labels express it, or null when
  *  this instance is machine-wide. */
@@ -305,7 +306,11 @@ export function dockerScopeKey(root: string | null): DockerScopeKey | null {
  */
 export function containerInScope(c: { project: string | null; workingDir: string | null }, s: DockerScopeKey): boolean {
   const wd = trimSlash(c.workingDir || "");
-  if (wd && (wd === s.dir || wd.startsWith(s.dir + "/"))) return true;
+  // Separator-agnostic: the scope root is a native path (backslashed on
+  // Windows) while a container's recorded working_dir may be spelled either
+  // way depending on how the stack was launched, so a literal "/" prefix test
+  // could never match on Windows and every container fell out of scope.
+  if (wd && isUnderPath(wd, s.dir)) return true;
   return !!s.project && normalizeProject(c.project || "") === s.project;
 }
 

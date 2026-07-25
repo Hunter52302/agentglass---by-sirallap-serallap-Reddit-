@@ -60,8 +60,27 @@ async function deliver(title: string, body: string, urgency: 0 | 1 | 2 = 2) {
       sink.broadcast({ title, body, urgency });
       return;
     }
+    // Resolve the binary BEFORE spawning rather than spawning and catching.
+    //
+    // `Bun.spawn` on a missing executable does not reject synchronously on
+    // Windows — the ENOENT escapes this try/catch entirely, and the failed
+    // handle keeps the process alive. In the test suite that meant a hang: the
+    // run stopped dead in alerts-sink and never reached the other files.
+    // notify-send is a Linux tool, so on Windows and macOS this is not an error
+    // condition at all, it is simply the wrong transport.
+    const bin = notifySendPath();
+    if (!bin) {
+      if (!warnedNoNotifySend) {
+        warnedNoNotifySend = true;
+        console.warn(
+          `[alerts] AGENTGLASS_NOTIFY=1 but notify-send is not available on ${process.platform} — ` +
+            "open the dashboard and a connected client will raise a native notification instead."
+        );
+      }
+      return;
+    }
     try {
-      Bun.spawn(["notify-send", "-a", "agentglass", "-u", "critical", "--", title, body], { stdout: "ignore" });
+      Bun.spawn([bin, "-a", "agentglass", "-u", "critical", "--", title, body], { stdout: "ignore" });
     } catch (e) {
       // Said once, not on every alert: the cause is a missing binary, so it
       // will be just as true the next thousand times and the log is the only
@@ -76,6 +95,17 @@ async function deliver(title: string, body: string, urgency: 0 | 1 | 2 = 2) {
 }
 
 let warnedNoNotifySend = false;
+
+/** Where notify-send lives, resolved once. `undefined` = not looked up yet,
+ *  `null` = looked up and absent. Cached because the answer cannot change
+ *  within a run and PATH lookups are not free on every alert. */
+let notifySendResolved: string | null | undefined;
+function notifySendPath(): string | null {
+  if (notifySendResolved === undefined) {
+    notifySendResolved = Bun.which("notify-send") ?? null;
+  }
+  return notifySendResolved;
+}
 
 /** A tool call is being held at the control-plane gate — ping the human. */
 export function pushGate(agent: string, tool: string, summary: string) {

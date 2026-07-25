@@ -16,7 +16,7 @@ import type {
 } from "../../shared/types.ts";
 import type { NormalizedEvent } from "./ingest.ts";
 import { costUsd, modelLabel } from "./pricing.ts";
-import { workspaceRoot, scopeRoots } from "./config.ts";
+import { workspaceRoot, scopeRoots, isUnderPath } from "./config.ts";
 
 /**
  * Where the database lives.
@@ -457,7 +457,10 @@ export function scopeClause(scope: string | null = workspaceRoot()): { clause: s
   // dashboard for a day spent working in ~/code/orbit-WEB-1042, which is where
   // the work actually happens.
   const roots = scopeRoots(scope);
-  const inScope = recordedPaths().filter((p) => roots.some((r) => p === r || p.startsWith(r + "/")));
+  // Separator-agnostic: Claude Code reports project_path with forward slashes
+  // and cwd with backslashes in the same payload, so a literal "/" prefix test
+  // matched neither reliably and the scope filter quietly returned nothing.
+  const inScope = recordedPaths().filter((p) => roots.some((r) => isUnderPath(p, r)));
   // Nothing recorded for this project yet. `AND 0` is the honest answer and the
   // fast one; an empty IN list is a syntax error.
   if (!inScope.length) return { clause: " AND 0", args: [] };

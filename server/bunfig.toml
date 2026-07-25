@@ -1,0 +1,5 @@
+[test]
+# Binds a sandbox database and config dir before any test module loads db.ts.
+# Without it the first transitive import of db.ts wins, and with nothing set
+# that is the developer's REAL database — see test/preload.ts.
+preload = ["./test/preload.ts"]

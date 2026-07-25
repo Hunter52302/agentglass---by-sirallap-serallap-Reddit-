@@ -4,6 +4,18 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+// `bun test` shares ONE process across every file, so a scope this file sets
+// stays set for every suite that runs after it — their rows then fall outside
+// the leaked scope and vanish from every scoped query, which reads as a
+// product bug in whichever file happened to be next. Captured at module load
+// (before anything below assigns it) and put back when this file is done.
+const __priorScope = process.env.AGENTGLASS_ROOT;
+afterAll(() => {
+  if (__priorScope === undefined) delete process.env.AGENTGLASS_ROOT;
+  else process.env.AGENTGLASS_ROOT = __priorScope;
+});
+
+
 /**
  * A real conflict, produced the way one actually happens: two branches editing
  * the same line, merged. Nothing here is worth testing against a fake — the
@@ -18,6 +30,13 @@ beforeAll(async () => {
   run(repo, "init", "-q", "-b", "main");
   run(repo, "config", "user.email", "t@example.com");
   run(repo, "config", "user.name", "t");
+  // Byte-exact assertions below, so never inherit the developer's autocrlf.
+  // On a Git-for-Windows default (core.autocrlf=true) git rewrites checkouts to
+  // CRLF and every exact-content assertion fails for a reason that has nothing
+  // to do with merging. Set per-repo rather than via GIT_CONFIG_* in a preload,
+  // because Bun on Windows does not propagate post-startup process.env changes
+  // to child processes — the env approach silently does nothing there.
+  run(repo, "config", "core.autocrlf", "false");
   const commit = (body: string, msg: string) => {
     writeFileSync(join(repo, "shared.txt"), body);
     run(repo, "add", "-A");

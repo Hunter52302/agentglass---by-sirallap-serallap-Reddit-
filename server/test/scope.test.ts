@@ -8,10 +8,22 @@
 // These tests drive the real query layer against a throwaway DB, because the
 // regression is "the WHERE clause isn't there at all": asserting on a SQL
 // fragment would happily pass while the rows stayed unfiltered.
-import { describe, expect, test, beforeAll } from "bun:test";
+import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, basename } from "node:path";
+
+// `bun test` shares ONE process across every file, so a scope this file sets
+// stays set for every suite that runs after it — their rows then fall outside
+// the leaked scope and vanish from every scoped query, which reads as a
+// product bug in whichever file happened to be next. Captured at module load
+// (before anything below assigns it) and put back when this file is done.
+const __priorScope = process.env.AGENTGLASS_ROOT;
+afterAll(() => {
+  if (__priorScope === undefined) delete process.env.AGENTGLASS_ROOT;
+  else process.env.AGENTGLASS_ROOT = __priorScope;
+});
+
 
 // Both are read once at module load inside db.ts / config.ts, so they have to
 // be set before the dynamic import below — not at the top of a normal import.
@@ -41,7 +53,10 @@ process.env.XDG_CONFIG_HOME = dir;
 let db: typeof import("../src/db.ts");
 
 const event = (project: string, session: string, over: Record<string, unknown> = {}) => ({
-  source_app: project.split("/").pop()!,
+  // basename(), not split("/"): these paths are native, and on Windows a
+  // backslashed path never splits on "/" — source_app came out as the entire
+  // absolute path and every assertion comparing it to "scoped" failed.
+  source_app: basename(project),
   session_id: session,
   hook_event_type: "PostToolUse",
   tool_name: "Bash",
@@ -66,7 +81,7 @@ beforeAll(async () => {
   db.insertEvent(event(OTHER, "s-out-1") as any);
   db.insertEvent(event(OTHER, "s-out-2") as any);
   // project_path is outside the scope, but the turn ran inside it — must count.
-  db.insertEvent(event(MONO, "s-worktree", { cwd: SCOPED + "/wt/feature" }) as any);
+  db.insertEvent(event(MONO, "s-worktree", { cwd: join(SCOPED, "wt", "feature") }) as any);
   // Shares the scope's name as a prefix and is a different project.
   db.insertEvent(event(SIBLING, "s-sibling") as any);
 });

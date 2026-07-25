@@ -6,6 +6,17 @@ import { privateHost } from "../src/net.ts";
 import { safeAbs } from "../src/git.ts";
 import { shellSafeRel, parseMakeTargets } from "../src/terminal.ts";
 import { tokenOk, isAuthExempt, isIntake } from "../src/auth.ts";
+import { isAbsolute, resolve } from "node:path";
+
+/**
+ * The WSL automount translation is off-Windows only, by construction:
+ * git.ts sets AUTOMOUNT_ROOT to null on win32 because native Windows resolves
+ * `C:\` itself. There is no mount to escape there, and resolve() collapses
+ * `..` on its own, so the clamp these tests pin has nothing to clamp — they
+ * assert a behaviour the platform does not have, not one it is missing.
+ * The NUL/empty rejection below is platform-independent and keeps running.
+ */
+const WSL_TRANSLATION = process.platform !== "win32";
 
 describe("privateHost", () => {
   test("loopback is always trusted, regardless of trustLan", () => {
@@ -50,15 +61,18 @@ describe("safeAbs", () => {
   });
 
   test("normalizes to an absolute path", () => {
-    expect(safeAbs("/a/b/../c")).toBe("/a/c");
-    expect(safeAbs("relative/x")?.startsWith("/")).toBe(true);
+    // The property is "absolute and collapsed", which holds on every platform;
+    // the literal "/a/c" spelling is POSIX-only, and isAbsolute is the portable
+    // way to say it.
+    expect(safeAbs("/a/b/../c")).toBe(resolve("/a/c"));
+    expect(isAbsolute(safeAbs("relative/x")!)).toBe(true);
   });
 
-  test("maps Windows drive paths onto the automount", () => {
+  test.skipIf(!WSL_TRANSLATION)("maps Windows drive paths onto the automount", () => {
     expect(safeAbs("C:\\Users\\Raide\\code\\app")).toBe("/mnt/c/Users/Raide/code/app");
   });
 
-  test("clamps a translated drive path inside its own mount", () => {
+  test.skipIf(!WSL_TRANSLATION)("clamps a translated drive path inside its own mount", () => {
     // `\` became a real separator, so `..` could climb out of the automount…
     expect(safeAbs("C:\\..\\..\\etc\\passwd")).toBeNull();
     // …or hop to a sibling drive while staying under the automount base.
@@ -67,7 +81,7 @@ describe("safeAbs", () => {
     expect(safeAbs("C:\\Users\\Raide\\code\\..\\app")).toBe("/mnt/c/Users/Raide/app");
   });
 
-  test("UNC paths are not translated: backslashes stay literal, as before", () => {
+  test.skipIf(!WSL_TRANSLATION)("UNC paths are not translated: backslashes stay literal, as before", () => {
     const unc = safeAbs("\\\\server\\share\\x");
     expect(unc).not.toBeNull();
     expect(unc!.endsWith("\\\\server\\share\\x")).toBe(true);

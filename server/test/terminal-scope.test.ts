@@ -9,6 +9,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
+// `bun test` shares ONE process across every file, so a scope this file sets
+// stays set for every suite that runs after it — their rows then fall outside
+// the leaked scope and vanish from every scoped query, which reads as a
+// product bug in whichever file happened to be next. Captured at module load
+// (before anything below assigns it) and put back when this file is done.
+const __priorScope = process.env.AGENTGLASS_ROOT;
+afterAll(() => {
+  if (__priorScope === undefined) delete process.env.AGENTGLASS_ROOT;
+  else process.env.AGENTGLASS_ROOT = __priorScope;
+});
+
+
 const dir = mkdtempSync(join(tmpdir(), "agx-termscope-"));
 const SCOPED = join(dir, "scoped");
 const OTHER = join(dir, "other");

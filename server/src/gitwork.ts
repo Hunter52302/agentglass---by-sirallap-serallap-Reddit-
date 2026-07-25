@@ -5,9 +5,9 @@
 // every mutating op is gated by AGENTGLASS_GIT_WRITE_DISABLED=1.
 
 import { resolve, basename, relative, dirname, sep, join } from "node:path";
-import { statSync, readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync } from "node:fs";
+import { statSync, readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, cpSync } from "node:fs";
 import { git, gitAsync, safeAbs, repoRootOfAsync, currentBranch } from "./git.ts";
-import { configuredRepoDirs, workspaceRoot, inScope } from "./config.ts";
+import { configuredRepoDirs, workspaceRoot, inScope, isUnderPath } from "./config.ts";
 import { worktreeParent, gitDir } from "./worktree.ts";
 import { entered, backoff } from "./loopwatch.ts";
 import type {
@@ -39,8 +39,17 @@ function repoRoot(root: unknown): string | null {
   if (hit && Date.now() - hit.at < ROOT_TTL_MS) return hit.top;
   const top = git(abs, ["rev-parse", "--show-toplevel"]);
   if (top.code !== 0) return null;
-  const t = top.stdout.trim();
-  if (!t) return null;
+  const raw = top.stdout.trim();
+  if (!raw) return null;
+  // Normalize to the platform's own separators before anything compares against
+  // it. On Windows `rev-parse --show-toplevel` answers with FORWARD slashes
+  // (`C:/Users/x/repo`), while `resolve()` — which every caller uses to build
+  // the path it checks — produces backslashes. `inRepo`'s
+  // `abs.startsWith(root + sep)` therefore never matched, and every path-taking
+  // operation in this file (stage, discard, conflict blocks, hunks, commit of a
+  // rename) rejected legitimate files as "invalid path" on that platform.
+  // resolve() is a no-op on POSIX, where the two already agree.
+  const t = resolve(raw);
   if (rootCache.size > 200) rootCache.clear();
   rootCache.set(abs, { at: Date.now(), top: t });
   return t;
@@ -631,8 +640,11 @@ export async function discoverRepos(paths: string[], knownRoots: string[] = [], 
 /** Keep only repos inside one of `dirs`. */
 function within(repos: GitRepoRef[], dirs: string[]): GitRepoRef[] {
   const bases = dirs.map((d) => safeAbs(d)).filter((d): d is string => !!d);
-  return repos.filter((r) => bases.some((b) => r.root === b || r.root.startsWith(b + sep)));
+  return repos.filter((r) => bases.some((b) => isUnderPath(r.root, b)));
 }
+
+const samePath = (a: string, b: string): boolean =>
+  isUnderPath(a, b) && isUnderPath(b, a);
 
 // --- mutating ops (all gated + path-validated) -------------------------------
 
@@ -1298,18 +1310,19 @@ export async function logGraph(rootIn: unknown, limit = 400, scope: "head" | "al
 const baseCache = new Map<string, { at: number; base: string | null }>();
 export async function baseOf(root: string, branch: string): Promise<string | null> {
   if (!branch || branch === "(detached)") return null;
-  const key = `${root}\u0000${branch}`;
+  const canonicalRoot = repoRoot(root) ?? root;
+  const key = `${canonicalRoot}\u0000${branch}`;
   const hit = baseCache.get(key);
   if (hit && Date.now() - hit.at < DEFAULT_BRANCH_TTL_MS) return hit.base;
   // Two subprocesses, and `worktrees()` asks once per checkout — 34 of them on
   // a repo with seventeen. Left synchronous they were the 806ms this endpoint
   // still cost after everything around them had been awaited.
-  const cfg = (await gitAsync(root, ["config", "--get", `branch.${branch}.agentglassbase`])).stdout.trim();
+  const cfg = (await gitAsync(canonicalRoot, ["config", "--get", `branch.${branch}.agentglassbase`])).stdout.trim();
   let base: string | null;
-  if (cfg && validRef(cfg) && (await gitAsync(root, ["rev-parse", "--verify", "--quiet", cfg])).code === 0) {
+  if (cfg && validRef(cfg) && (await gitAsync(canonicalRoot, ["rev-parse", "--verify", "--quiet", cfg])).code === 0) {
     base = cfg;
   } else {
-    const trunk = await defaultBranch(root);
+    const trunk = await defaultBranch(canonicalRoot);
     // A branch is not its own base; the trunk checkout simply has none.
     base = !trunk || trunk === branch || trunk.replace(/^origin\//, "") === branch ? null : trunk;
   }
@@ -1408,7 +1421,10 @@ export function conflicts(rootIn: unknown): { ok: boolean; state: GitTreeState; 
   const root = repoRoot(rootIn);
   if (!root) return { ok: false, state: "clean", files: [], error: "not a git repository root" };
   const r = git(root, ["diff", "--name-only", "--diff-filter=U", "-z"]);
-  const files = r.stdout.split("\u0000").filter(Boolean).map((rel) => join(root, rel));
+  // Preserve the caller's spelling (/var vs macOS's canonical /private/var)
+  // in the response while using the canonical repo root for Git operations.
+  const displayRoot = safeAbs(rootIn) ?? root;
+  const files = r.stdout.split("\u0000").filter(Boolean).map((rel) => join(displayRoot, rel));
   return { ok: true, state: treeState(root), files };
 }
 
@@ -1532,11 +1548,17 @@ function parseWorktreeList(stdout: string, root: string): GitWorktree[] {
   const out: GitWorktree[] = [];
   let cur: Partial<GitWorktree> | null = null;
   const flush = () => {
-    if (cur && cur.path) out.push({ path: cur.path, branch: cur.branch || "(detached)", head: cur.head || "", current: cur.path === root, bare: !!cur.bare, locked: !!cur.locked, prunable: !!cur.prunable });
+    if (cur && cur.path) out.push({ path: cur.path, branch: cur.branch || "(detached)", head: cur.head || "", current: samePath(cur.path, root), bare: !!cur.bare, locked: !!cur.locked, prunable: !!cur.prunable });
     cur = null;
   };
   for (const line of stdout.split("\n")) {
-    if (line.startsWith("worktree ")) { flush(); cur = { path: line.slice(9) }; }
+    // Normalized at the boundary, like repoRoot(). git answers with forward
+    // slashes on Windows while everything downstream — `resolve()`, the scope
+    // checks, the caller's own `join()`-built paths — uses backslashes. Leaving
+    // git's spelling in the public shape meant these paths never compared equal
+    // to anything: worktree lookups keyed by path missed, `current` was never
+    // true, and the UI showed a checkout it could not then act on.
+    if (line.startsWith("worktree ")) { flush(); cur = { path: resolve(line.slice(9)) }; }
     else if (!line) flush();
     else if (!cur) continue;
     else if (line.startsWith("HEAD ")) cur.head = line.slice(5, 12);
@@ -1909,7 +1931,7 @@ export async function worktreeLeftovers(rootIn: string, pathIn: unknown): Promis
   if (!root || !abs) return { path: String(pathIn ?? ""), entries: [], more: 0, skipped: 0, identical: 0, error: "invalid path" };
   // Only a path this repo actually owns as a worktree, so this can't be used to
   // enumerate arbitrary directories through the API.
-  if (!worktreeList(root).some((w) => w.path === abs)) {
+  if (!worktreeList(root).some((w) => samePath(w.path, abs))) {
     return { path: abs, entries: [], more: 0, skipped: 0, identical: 0, error: "not a worktree of this repository" };
   }
   const r = await gitAsync(abs, ["-c", "core.quotePath=false", "status", "--porcelain=v1", "--ignored"]);
@@ -2021,7 +2043,7 @@ export async function rescueLeftovers(rootIn: string, pathIn: unknown, relsIn: u
   const root = repoRoot(rootIn); if (!root) return { ok: false, error: "not a git repository root" };
   const g = guard(root); if (g) return g;
   const abs = safeAbs(pathIn); if (!abs) return { ok: false, error: "invalid path" };
-  if (!worktreeList(root).some((w) => w.path === abs)) return { ok: false, error: "not a worktree of this repository" };
+  if (!worktreeList(root).some((w) => samePath(w.path, abs))) return { ok: false, error: "not a worktree of this repository" };
   const main = mainCheckout(root);
   if (main === abs) return { ok: false, error: "that is the main checkout — nothing to rescue it into" };
   if (!Array.isArray(relsIn)) return { ok: false, error: "no paths given" };
@@ -2041,11 +2063,18 @@ export async function rescueLeftovers(rootIn: string, pathIn: unknown, relsIn: u
     if (!existsSync(from)) { skipped.push({ path: rel, why: "no longer in the worktree" }); continue; }
     try {
       mkdirSync(dirname(to), { recursive: true });
-      // `cp -R` rather than a hand-rolled walk: it is one spawn for a file or a
-      // whole tree, and it preserves what a copy of somebody's notes should
-      // preserve. `-n` is a second refusal to clobber behind the check above.
-      const p = Bun.spawnSync(["cp", "-Rn", from, to], { stdout: "pipe", stderr: "pipe" });
-      if (p.exitCode !== 0) { skipped.push({ path: rel, why: p.stderr?.toString().trim() || "copy failed" }); continue; }
+      // `cpSync` rather than spawning `cp -Rn`.
+      //
+      // There is no `cp` on Windows, so the spawn failed outright and rescuing
+      // anything from a leftover checkout was impossible on that platform — the
+      // one situation where the files are about to be deleted and the copy is
+      // the only thing standing between the user and losing them.
+      //
+      // Same contract as before: `recursive` is `-R`, and `force: false` with
+      // `errorOnExist: true` is `-n`'s refusal to clobber, made loud instead of
+      // silent. The existsSync check below still stands for the same reason it
+      // did against `cp`.
+      cpSync(from, to, { recursive: true, force: false, errorOnExist: true });
       // Look, rather than believe the exit code. `cp -n` returns 0 when it
       // declines to overwrite, and a caller about to delete the original needs
       // "it is there" to mean the file is there. Five screenshots were reported
@@ -2119,14 +2148,14 @@ export function fixWorktreeOwnership(rootIn: string, pathIn: unknown): GitAction
   const g = guard(root); if (g) return g;
   const abs = safeAbs(pathIn); if (!abs) return { ok: false, error: "invalid path" };
   // Only a path git itself vouches for, and never the checkout we are in.
-  if (abs === root) return { ok: false, error: "that is the main checkout" };
+  if (samePath(abs, root)) return { ok: false, error: "that is the main checkout" };
   // Must be a *live* worktree, not a prunable one: a prunable entry is a broken
   // registration whose gitdir points nowhere valid, and an attacker with write
   // access to the repo can fabricate one aimed at an arbitrary root-owned path.
   // Trusting it here would point `pkexec chown -R` at that path — a privilege
   // escalation. `git worktree list` flags such entries prunable, so we require a
   // non-prunable match before handing the path to root.
-  if (!worktreeList(root).some((w) => w.path === abs && !w.prunable)) return { ok: false, error: "not a worktree of this repository" };
+  if (!worktreeList(root).some((w) => samePath(w.path, abs) && !w.prunable)) return { ok: false, error: "not a worktree of this repository" };
   if (!foreignOwned(abs)) return { ok: true, output: "already yours" };
 
   const uid = typeof process.getuid === "function" ? process.getuid() : -1;
@@ -2148,13 +2177,13 @@ export function removeWorktree(rootIn: string, pathIn: unknown, force: boolean):
   const root = repoRoot(rootIn); if (!root) return { ok: false, error: "not a git repository root" };
   const g = guard(root); if (g) return g;
   const abs = safeAbs(pathIn); if (!abs) return { ok: false, error: "invalid path" };
-  if (abs === root) return { ok: false, error: "can't remove the current worktree" };
+  if (samePath(abs, root)) return { ok: false, error: "can't remove the current worktree" };
   // Must be a worktree git reports for THIS root — the same check its siblings
   // (worktreeLeftovers, rescueLeftovers, fixWorktreeOwnership) all make. Without
   // it, a linked worktree of a *different* repo makes `git worktree remove` fail
   // and the restoreRegistration fallback below fabricates a phantom registration
   // inside this repo's .git, corrupting its metadata.
-  if (!worktreeList(root).some((w) => w.path === abs)) return { ok: false, error: "not a worktree of this repository" };
+  if (!worktreeList(root).some((w) => samePath(w.path, abs))) return { ok: false, error: "not a worktree of this repository" };
 
   // Refuse rather than start something that cannot finish. Git deletes the
   // registration before the files, so "try it and see" is not free: the failure
@@ -2173,7 +2202,7 @@ export function removeWorktree(rootIn: string, pathIn: unknown, force: boolean):
 
   // The branch, captured while the worktree is still registered — it is what
   // the registration has to be rebuilt from if the removal fails anyway.
-  const branch = worktreeList(root).find((w) => w.path === abs)?.branch ?? "";
+  const branch = worktreeList(root).find((w) => samePath(w.path, abs))?.branch ?? "";
   const r = run(root, force ? ["worktree", "remove", "--force", abs] : ["worktree", "remove", abs]);
   if (!r.ok && existsSync(abs) && restoreRegistration(root, abs, branch)) {
     return { ...r, error: `${r.error ?? "worktree remove failed"} — the worktree is still registered; nothing was left orphaned` };

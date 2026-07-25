@@ -94,6 +94,12 @@ def main():
         "session_id": session_id,
         "hook_event_type": event_type,
         "payload": payload,
+        # Glasses for Argus: the pid of the agent process that spawned this
+        # hook. It is the only place the two halves can be joined — nothing in
+        # a hook payload carries a pid, and nothing in the OS process table
+        # carries a session id, so without this "is this process reporting?"
+        # can only be answered per-vendor. Ignored by upstream's ingest.
+        "pid": os.getppid(),
         "model_name": model_name,
     }
     if chat is not None:

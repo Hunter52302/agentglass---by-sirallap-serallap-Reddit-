@@ -7,12 +7,18 @@ let store: typeof import("../src/lib/updateStore.ts");
 let notifyHistory: typeof import("../src/lib/sysNotify.ts")["notifyHistory"];
 const mem = new Map<string, string>();
 beforeAll(async () => {
-  (globalThis as any).location ??= new URL("http://localhost:5173/");
-  (globalThis as any).localStorage ??= {
-    getItem: (k: string) => mem.get(k) ?? null,
-    setItem: (k: string, v: string) => { mem.set(k, v); },
-    removeItem: (k: string) => { mem.delete(k); },
-  };
+  Object.defineProperty(globalThis, "location", {
+    configurable: true,
+    value: new URL("http://localhost:5173/"),
+  });
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: {
+      getItem: (k: string) => mem.get(k) ?? null,
+      setItem: (k: string, v: string) => { mem.set(k, v); },
+      removeItem: (k: string) => { mem.delete(k); },
+    },
+  });
   store = await import("../src/lib/updateStore.ts");
   ({ notifyHistory } = await import("../src/lib/sysNotify.ts"));
 });

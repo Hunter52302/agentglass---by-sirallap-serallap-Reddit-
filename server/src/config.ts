@@ -35,7 +35,7 @@ interface Config {
   terminalDisabled?: boolean;
 }
 
-function load(): Config {
+function load(CONFIG_PATH: string = currentConfigPath()): Config {
   try {
     if (!existsSync(CONFIG_PATH)) return {};
     const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as unknown;
@@ -64,7 +64,34 @@ function load(): Config {
   }
 }
 
-const config = load();
+/**
+ * The parsed config file, re-read when the path it comes from changes.
+ *
+ * `CONFIG_PATH` is computed from XDG_CONFIG_HOME at import, and a plain
+ * `const config = load()` froze the file's CONTENTS at import too — so in
+ * `bun test`, which shares one process across every file, whichever suite
+ * imported this module first decided the config for all of them. A later file
+ * pointing XDG_CONFIG_HOME at its own fixture still got the earlier one's
+ * settings, silently: an inherited `root` scoped a suite that had deliberately
+ * unscoped itself, and its rows vanished from every scoped query.
+ *
+ * Keyed on the resolved path for exactly the reason workspaceRoot() documents
+ * below. In a real server the path never changes, so this costs one string
+ * comparison.
+ */
+let configFor: string | undefined;
+let configCache: Config = {};
+function currentConfigPath(): string {
+  return join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "agentglass", "config.json");
+}
+function cfg(): Config {
+  const path = currentConfigPath();
+  if (configFor !== path) {
+    configFor = path;
+    configCache = load(path);
+  }
+  return configCache;
+}
 
 const expand = (p: string) => (p.startsWith("~/") ? join(homedir(), p.slice(2)) : p);
 
@@ -93,7 +120,7 @@ const expand = (p: string) => (p.startsWith("~/") ? join(homedir(), p.slice(2)) 
 let cachedRoot: string | null | undefined;
 let cachedFor: string | undefined;
 export function workspaceRoot(): string | null {
-  const asked = process.env.AGENTGLASS_ROOT || config.root;
+  const asked = process.env.AGENTGLASS_ROOT || cfg().root;
   // Keyed on what was asked for, not merely "have we answered before". The
   // scope never changes in a running server, so this costs one comparison —
   // but `bun test` shares a process, and the first suite to call this used to
@@ -131,14 +158,61 @@ export function workspaceRoot(): string | null {
  * beside `~/code/orbit`), which no prefix test can ever match; that is the whole
  * reason this consults git rather than the path alone.
  */
+/**
+ * Is `child` the same path as, or inside, `parent`?
+ *
+ * Separator-agnostic on purpose, and this is not pedantry — it is the single
+ * most expensive bug in this codebase on Windows. A hardcoded `parent + "/"`
+ * never matches there, because `resolve()` yields backslashes; and the two
+ * sides genuinely disagree in practice, since Claude Code reports
+ * `project_path` with forward slashes and `cwd` with backslashes in the SAME
+ * payload. Every containment test built on a literal "/" therefore returned
+ * false, which surfaced as "outside the open project" refusals, "invalid path"
+ * errors, and scope filters that silently matched nothing.
+ *
+ * Compare on a normalised form instead, so either spelling of the same location
+ * answers the same way.
+ */
+/**
+ * A backslash is only a separator where it IS one.
+ *
+ * On Windows, `\` and `/` are interchangeable. On macOS and Linux a backslash
+ * is an ordinary, legal character in a filename — a directory really can be
+ * called `we\ird`, and rewriting it to `we/ird` would invent a level of nesting
+ * that does not exist and could report an unrelated path as "inside" a scope.
+ *
+ * So the rewrite is applied on Windows, or to a string that is unambiguously a
+ * Windows path (drive-letter or UNC) wherever it is seen — which is the case
+ * that actually matters off Windows, since a transcript recorded on Windows can
+ * be read on a Mac.
+ */
+const WINDOWSISH = /^([A-Za-z]:[\\/]|\\\\)/;
+const normSep = (p: string) => {
+  let normalized = process.platform === "win32" || WINDOWSISH.test(p) ? p.replace(/\\/g, "/") : p;
+  // macOS exposes /var, /tmp, and /etc as symlinks into /private. Git and
+  // realpath-based APIs return the canonical spelling while tmpdir()/resolve()
+  // retain the public spelling. They are the same location and must not fail a
+  // scope boundary merely because each side chose a different alias.
+  if (process.platform === "darwin") {
+    normalized = normalized.replace(/^\/private(?=\/(?:var|tmp|etc)(?:\/|$))/, "");
+  }
+  return normalized.replace(/\/+$/, "");
+};
+
+export function isUnderPath(child: string, parent: string): boolean {
+  const c = normSep(child);
+  const p = normSep(parent);
+  return c === p || c.startsWith(p + "/");
+}
+
 export function inScope(path: string | null | undefined, scope = workspaceRoot()): boolean {
   if (!scope) return true; // whole-machine: nothing to enforce
   if (!path) return false;
   const p = resolve(expand(path));
   // The plain prefix test first: it answers every non-worktree case without a
   // subprocess, including the container-folder scope where the family is moot.
-  if (p === scope || p.startsWith(scope + "/")) return true;
-  return worktreeFamily(scope).some((r) => p === r || p.startsWith(r + "/"));
+  if (isUnderPath(p, scope)) return true;
+  return worktreeFamily(scope).some((r) => isUnderPath(p, r));
 }
 
 /** The directories a scoped instance is about: the project plus its linked
@@ -233,7 +307,7 @@ export function setWorkspaceRoot(rootIn: string | null): { ok: boolean; workspac
  */
 export function chatBypassAllowed(): boolean {
   if (process.env.AGENTGLASS_CHAT_BYPASS !== undefined) return process.env.AGENTGLASS_CHAT_BYPASS === "1";
-  return config.chatBypass === true;
+  return cfg().chatBypass === true;
 }
 
 /**
@@ -246,7 +320,7 @@ export function terminalDisabledSource(): "env" | "config" | null {
   if (process.env.AGENTGLASS_TERMINAL_DISABLED !== undefined) {
     return process.env.AGENTGLASS_TERMINAL_DISABLED === "1" ? "env" : null;
   }
-  return config.terminalDisabled === true ? "config" : null;
+  return cfg().terminalDisabled === true ? "config" : null;
 }
 
 export function configuredRepoDirs(): string[] {
@@ -255,7 +329,7 @@ export function configuredRepoDirs(): string[] {
   // or hold non-string entries. Guard before mapping: an unguarded `.map(expand)`
   // threw a TypeError that broke GET /git/repos in the default whole-machine mode
   // — a single typo in config.json taking out the repo picker for the machine.
-  const raw = fromEnv.length ? fromEnv : config.repoDirs ?? [];
+  const raw = fromEnv.length ? fromEnv : cfg().repoDirs ?? [];
   const dirs = Array.isArray(raw) ? raw.filter((d): d is string => typeof d === "string") : [];
   return dirs.map(expand);
 }

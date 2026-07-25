@@ -1,0 +1,46 @@
+[
+  {
+    "id": "rm-rf",
+    "description": "Destructive recursive delete",
+    "enabled": true,
+    "kind": "command",
+    "action": "^bash$",
+    "target": "rm\\s+-r?f",
+    "decision": "gate"
+  },
+  {
+    "id": "curl-pipe-shell",
+    "description": "Piping a download straight into a shell",
+    "enabled": true,
+    "kind": "command",
+    "action": "^bash$",
+    "target": "(curl|wget)[^|]*\\|\\s*(ba|z|)sh",
+    "decision": "kill"
+  },
+  {
+    "id": "ssh-keys",
+    "description": "Do not create, modify, or delete SSH keys or config",
+    "enabled": true,
+    "kind": "file",
+    "protected_path": "${WATCH_DIR}/.ssh",
+    "operations": ["create", "write", "delete"],
+    "decision": "flag"
+  },
+  {
+    "id": "env-files",
+    "description": "Require approval before touching secrets files",
+    "enabled": true,
+    "kind": "any",
+    "target": "(^|/)\\.env(\\.|$)",
+    "decision": "gate"
+  },
+  {
+    "id": "git-force-push",
+    "description": "Force push rewrites remote history",
+    "enabled": true,
+    "kind": "command",
+    "action": "^bash$",
+    "target": "git\\s+push[^\\n]*(--force|-f)\\b",
+    "decision": "gate"
+  }
+]

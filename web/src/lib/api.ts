@@ -1,4 +1,5 @@
 import type { WatchEvent, SessionRollup, StatsSummary, SkillInfo, FileChange, DiffHunk, Insight, SearchHit, PendingGate, GateRecord, SessionDetail, GitStatusResponse, CommitResult, WalkthroughResult, WalkthroughInputFile, GitRepoRef, FsCompletion, WorkingTree, GitActionResult, GitBranch, GitCommit, GitStash, GitGraphLine, GitWorktree, WorktreeLeftovers, GitRemote, GitRemoteBranch, GitTag, GitReflogEntry, GitLogEntry, DockerOverview, DockerStat, DockerActionResult, DockerCapability, TerminalCommands, ChatImage, ConflictBlock, BlockChoice, UpdateStatus, ReleaseNotes, PrListResponse, PrDetail, PrActionResult, GitCapability, HookSetupStatus, HookSetupResult } from "../../../shared/types.ts";
+import type { EnvTierStatus, EnvSummary, EnvRuntime, EnvConnection, EnvEvent, FsMap, ActorLane, SuspectRollup, EnvTier, RedlineRuleInput, RedlineStatus, KillableGate, ReplayBounds, ReplayState, PtyShell } from "../../../shared/env.ts";
 import * as demo from "./demo.ts";
 
 export const IS_DEMO = demo.IS_DEMO;
@@ -20,10 +21,17 @@ const DESKTOP_API: string | undefined =
     ? (window as unknown as { agentglass?: { apiOrigin?: string } }).agentglass?.apiOrigin
     : undefined;
 
+// Bun unit tests import modules that depend on the API without a DOM. Keep
+// module evaluation pure there; browser builds still use the real page host.
+const PAGE_LOCATION =
+  typeof location !== "undefined"
+    ? location
+    : { origin: "http://localhost:4000", hostname: "localhost" };
+
 export const SERVER: string =
   (import.meta.env.VITE_CW_SERVER as string | undefined)?.replace(/\/$/, "") ||
   DESKTOP_API?.replace(/\/$/, "") ||
-  (SERVED_BY_API ? location.origin : `http://${location.hostname}:4000`);
+  (SERVED_BY_API ? PAGE_LOCATION.origin : `http://${PAGE_LOCATION.hostname}:4000`);
 
 /**
  * Whether the line above *guessed* the origin rather than being told it.
@@ -208,6 +216,36 @@ const realApi = {
   changes: (limit = 200) => get<{ changes: FileChange[] }>(`/changes?limit=${limit}`),
   session: (id: string) => get<SessionDetail>(`/session?id=${encodeURIComponent(id)}`),
   insights: () => get<{ insights: Insight[] }>(`/insights`),
+  // Glasses for Argus — the environment tier. Separate endpoints because this
+  // is a separate table: observations about the machine, not agent telemetry.
+  envStatus: () => get<EnvTierStatus>(`/env/status`),
+  envSummary: () => get<EnvSummary>(`/env/summary`),
+  envRuntimes: () => get<EnvRuntime[]>(`/env/runtimes`),
+  envConnections: (limit = 100) => get<EnvConnection[]>(`/env/connections?limit=${limit}`),
+  envFiles: (limit = 100) => get<EnvEvent[]>(`/env/files?limit=${limit}`),
+  envMap: (limit = 600) => get<FsMap>(`/env/map?limit=${limit}`),
+  envLanes: (windowMs = 3_600_000) => get<ActorLane[]>(`/env/lanes?window=${windowMs}`),
+  envSuspect: (windowMs = 3_600_000) => get<SuspectRollup>(`/env/suspect?window=${windowMs}`),
+  envRecent: (tier?: EnvTier, limit = 200) =>
+    get<EnvEvent[]>(`/env/recent?limit=${limit}${tier ? `&tier=${tier}` : ""}`),
+  // Live lens control — no server restart to answer "what is touching my files?"
+  envSetWatch: (b: { enabled: boolean; dir?: string | null }) =>
+    post<{ ok: boolean; status: EnvTierStatus }>(`/env/watch`, b),
+  envSetScope: (all: boolean) => post<{ ok: boolean; status: EnvTierStatus }>(`/env/scope`, { all }),
+  // Redlines: the policy layer + the escalation agentglass's gate cannot do.
+  envRedlines: () => get<RedlineStatus>(`/env/redlines`),
+  envReloadRedlines: () => post<RedlineStatus & { ok: boolean }>(`/env/redlines/reload`, {}),
+  envUpsertRedline: (rule: RedlineRuleInput) =>
+    post<RedlineStatus & { ok: boolean }>(`/env/redlines/upsert`, rule),
+  envDeleteRedline: (id: string) =>
+    post<RedlineStatus & { ok: boolean; found: boolean }>(`/env/redlines/delete`, { id }),
+  envKillable: () => get<KillableGate[]>(`/env/gate/killable`),
+  envKillGate: (id: string) => post<{ ok: boolean; denied?: boolean; killed?: unknown; error?: string }>(`/env/gate/kill`, { id }),
+  // Replay: state at an instant, folded from the append-only table.
+  envShells: (limit = 12) => get<PtyShell[]>(`/env/shells?limit=${limit}`),
+  envReveal: (p: string) => post<{ ok: boolean; revealed?: string; how?: string; error?: string }>(`/env/reveal`, { path: p }),
+  envReplayBounds: () => get<ReplayBounds>(`/env/replay/bounds`),
+  envReplayAt: (at: number, windowMs = 60_000) => get<ReplayState>(`/env/replay?at=${at}&window=${windowMs}`),
   search: (q: string) => get<{ hits: SearchHit[] }>(`/search?q=${encodeURIComponent(q)}`),
   gatePending: () => get<{ gates: PendingGate[] }>(`/gate/pending`),
   gateHistory: (limit = 25) => get<{ gates: GateRecord[] }>(`/gate/history?limit=${limit}`),
@@ -434,6 +472,16 @@ const realApi = {
 };
 
 // In demo mode every call resolves against the fabricated dataset — no server.
+/** The environment tier reads the real machine, so the demo reports it off
+ *  rather than inventing runtimes that are not running. */
+const DEMO_ENV_STATUS: EnvTierStatus = {
+  enabled: false,
+  process: { enabled: false, poll_ms: 0, cmdline: false },
+  network: { enabled: false, poll_ms: 0, all: false },
+  file: { enabled: false, available: false, dir: null },
+  platform: "demo",
+};
+
 const demoApi: typeof realApi = {
   recent: () => D(demo.recent()),
   // The demo is a showcase of the whole fleet, so it is never scoped.
@@ -448,6 +496,44 @@ const demoApi: typeof realApi = {
   changes: () => D(demo.changes()),
   session: (id: string) => D(demo.session(id)),
   insights: () => D(demo.insights()),
+  // The environment tier reads the real machine's process and socket tables, so
+  // there is nothing honest to fake here — the demo reports it as switched off
+  // rather than inventing runtimes that are not running.
+  envStatus: () => D(DEMO_ENV_STATUS),
+  envSummary: () => D({
+    runtimes_running: 0, runtimes_blind: 0, connections_open: 0,
+    connections_ai_endpoint: 0, file_events_last_hour: 0,
+  }),
+  envRuntimes: () => D([]),
+  envConnections: () => D([]),
+  envFiles: () => D([]),
+  envMap: () => D({
+    root: null, nodes: [], truncated: false, total_nodes: 0, agents: [],
+    fs_tier_enabled: false, unclaimed_total: 0,
+  }),
+  envLanes: () => D([]),
+  envSuspect: () => D({
+    unattributed_writes: 0, unattributed_paths: 0, silent_runtimes: 0,
+    window_ms: 3_600_000, recent: [],
+  }),
+  envRecent: () => D([]),
+  // The demo reads no real machine, so the lens cannot move. Reported as a
+  // refusal rather than a silent no-op that looks like a broken button.
+  envSetWatch: () => D({ ok: false, status: DEMO_ENV_STATUS }),
+  envSetScope: () => D({ ok: false, status: DEMO_ENV_STATUS }),
+  envRedlines: () => D({ file: "", loaded_from: null, error: null, rules: [] }),
+  envReloadRedlines: () => D({ ok: false, file: "", loaded_from: null, error: "the demo is read-only", rules: [] }),
+  envUpsertRedline: (_rule: RedlineRuleInput) => D({ ok: false, file: "", loaded_from: null, error: "the demo is read-only", rules: [] }),
+  envDeleteRedline: (_id: string) => D({ ok: false, found: false, file: "", loaded_from: null, error: "the demo is read-only", rules: [] }),
+  envKillable: () => D([]),
+  // Never in the demo: killing a process is irreversible and there is no
+  // process here to kill. Refused explicitly rather than faked as success.
+  envKillGate: () => D({ ok: false, error: "the demo is read-only" }),
+  envShells: () => D([]),
+  // No machine to open a file manager on. Refused rather than faked.
+  envReveal: () => D({ ok: false, error: "the demo is read-only" }),
+  envReplayBounds: () => D({ first: null, last: null, count: 0 }),
+  envReplayAt: (at: number) => D({ at, runtimes: [], connections: 0, file_writes: 0, window: [] }),
   search: (q: string) => D(demo.search(q)),
   gatePending: () => D(demo.gatePending()),
   gateHistory: () => D({ gates: [] as GateRecord[] }),

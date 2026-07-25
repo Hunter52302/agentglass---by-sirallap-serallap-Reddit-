@@ -11,6 +11,7 @@ import { Logo } from "./Logo.tsx";
 import { Select } from "./Select.tsx";
 import { subscribe as subscribeChats, attentionCount } from "../lib/chatStore.ts";
 import { WorkspaceIcon } from "./workspace/icons.tsx";
+import { ArgusEyeIcon } from "./ArgusIcon.tsx";
 
 // Sessions whose model never resolved carry the "unknown" provider value; it
 // stays lowercase everywhere it is compared (server sentinel, providerOf), but
@@ -96,7 +97,7 @@ function MoreMenu({ onOpen }: { onOpen: () => void }) {
 
 export function Header({
   conn, windowMs, onWindow, apps, types, providers, filter, onFilter, theme, onTheme,
-  sound, onSound, onOpenPalette, onOpenHelp, onOpenStats, onOpenSkills, onOpenWorkspace, onOpenSettings, onClear, showUsage,
+  sound, onSound, onOpenPalette, onOpenHelp, onOpenStats, onOpenSkills, onOpenWorkspace, onOpenArgus, onOpenSettings, onClear, showUsage,
   workspace, onOpenProject,
 }: {
   conn: ConnState;
@@ -116,6 +117,7 @@ export function Header({
   onOpenStats: () => void;
   onOpenSkills: () => void;
   onOpenWorkspace: () => void;
+  onOpenArgus: () => void;
   onOpenSettings: () => void;
   onClear: () => void;
   showUsage: boolean;
@@ -135,10 +137,17 @@ export function Header({
       style={{ borderBottom: "1px solid color-mix(in srgb, var(--border) 40%, transparent)", background: "color-mix(in srgb, var(--bg2) 94%, var(--bg))", paddingLeft: IS_MAC_DESKTOP ? 76 : undefined }}>
       <div className="flex items-center gap-2.5 shrink-0">
         <motion.span initial={{ rotate: -20, opacity: 0 }} animate={{ rotate: 0, opacity: 1 }} transition={{ type: "spring", stiffness: 200 }} className="flex pointer-events-none">
-          <Logo size={26} title="agentglass" />
+          <Logo size={26} title="Glasses for Argus" />
         </motion.span>
+        {/* Glasses for Argus — the local merge's wordmark. "Glasses" keeps
+            agentglass's half in the accent colour it always had; "Argus" is the
+            environment tier grafted onto it. Upstream branding is untouched
+            everywhere it identifies the PROJECT (repo links, the demo badge) —
+            only the running app's title changes. */}
         <div className="leading-none pointer-events-none">
-          <div className="text-[16px] font-bold tracking-tight" style={{ color: "var(--text)" }}>agent<span style={{ color: "var(--primary)" }}>glass</span></div>
+          <div className="text-[16px] font-bold tracking-tight" style={{ color: "var(--text)" }}>
+            <span style={{ color: "var(--primary)" }}>Glasses</span> for Argus
+          </div>
         </div>
         {/* The project defines what every other number on screen means, so it
             reads as a control in its own right rather than a caption under the
@@ -252,6 +261,11 @@ export function Header({
               style={{ background: "color-mix(in srgb, var(--success) 30%, transparent)" }}>{waiting}</span>
           )}
         </button>
+        {/* Argus gets its own door, not a tab. Its surface answers a different
+            question from this cockpit — what is on the machine, rather than
+            what the fleet reported — and most of its rows have no session and
+            no cost, so it does not belong inside a fleet-shaped view. */}
+        <IconBtn title="Argus — what the machine shows: runtimes, connections & unclaimed file writes (a)" onClick={onOpenArgus}><ArgusEyeIcon /></IconBtn>
         {/* Skills demoted to a plain icon */}
         <IconBtn title="Skills explorer — browse every available skill (k)" onClick={onOpenSkills}><SkillsIcon /></IconBtn>
         <MoreMenu onOpen={onOpenSettings} />

@@ -10,10 +10,10 @@
 // scoped with `-C <root>`; commit paths are validated to stay inside the repo
 // root; and the whole feature can be killed with AGENTGLASS_COMMIT_DISABLED=1.
 
-import { resolve, dirname, relative, sep } from "node:path";
+import { resolve, dirname, basename, relative, sep } from "node:path";
 // readFileSync: /etc/wsl.conf, for the Windows drive translation below.
 import { readFileSync, statSync } from "node:fs";
-import { inScope } from "./config.ts";
+import { inScope, isUnderPath } from "./config.ts";
 import { record } from "./gitlog.ts";
 import { currentLabel, resumedAs } from "./loopwatch.ts";
 import { withSpawnSlot } from "./spawnpool.ts";
@@ -119,6 +119,11 @@ export function __resetGitCapForTest(): void {
  */
 const gitTimeoutMs = () => Number(process.env.AGENTGLASS_GIT_TIMEOUT_SECONDS ?? 120) * 1000;
 
+/** How long to keep reading a dead process's pipes before giving up on them.
+ *  Generous for a flush that is already in flight, short enough that a pipe held
+ *  open by a surviving grandchild cannot retire a spawn slot. */
+const PIPE_DRAIN_GRACE_MS = 2000;
+
 async function runGit(cwd: string, args: string[]): Promise<GitResult> {
   const t0 = performance.now();
   // Whose work this is, read while we are still standing inside the caller —
@@ -142,10 +147,38 @@ async function runGit(cwd: string, args: string[]): Promise<GitResult> {
       // this path — prs.ts fetches PR refs from the network through here.
       env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "", SSH_ASKPASS_REQUIRE: "never" },
     });
-    const [stdout, stderr, code] = await Promise.all([
+    // Wait for the PROCESS first, then for its output — with a bound.
+    //
+    // Reading a pipe to EOF waits for every writer to let go of it, and killing
+    // git does not kill what git started. On Windows especially, the timeout
+    // above terminates git itself while the `ssh` it spawned inherits the pipe
+    // and keeps it open; `new Response(proc.stdout).text()` then never resolves.
+    // Verified: with a surviving grandchild the read was still blocked eight
+    // seconds after the child was killed.
+    //
+    // That is not a slow call, it is a permanently pending one — and since every
+    // awaited git holds a slot from the shared spawn pool, each occurrence
+    // retires a slot for the life of the process. Enough of them and nothing in
+    // the app can run git at all: exactly the freeze the pool exists to prevent,
+    // reached from the other side.
+    //
+    // So once the process is gone, whatever has not arrived is not coming from
+    // it. The grace window is for the ordinary case where the last bytes are
+    // still in flight at exit; it is never reached when the pipes close
+    // normally, because the read has already settled by then.
+    const output = Promise.all([
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),
-      proc.exited,
+    ]);
+    const code = await proc.exited;
+    const [stdout, stderr] = await Promise.race([
+      output,
+      new Promise<[string, string]>((r) => {
+        const t = setTimeout(() => r(["", ""]), PIPE_DRAIN_GRACE_MS);
+        // Not unref'd: this resolve is the only thing that can settle the await
+        // when a grandchild holds the pipe. See gate.ts and spawnpool.ts.
+        void t;
+      }),
     ]);
     // Everything after this line is synchronous parsing of what git said, on
     // behalf of whoever asked.
@@ -199,7 +232,7 @@ export function safeAbs(p: unknown): string | null {
   const drive = p.match(WINDOWS_DRIVE);
   if (drive && AUTOMOUNT_ROOT) {
     const mount = AUTOMOUNT_ROOT + drive[1]!.toLowerCase();
-    if (abs !== mount && !abs.startsWith(mount + "/")) return null;
+    if (!isUnderPath(abs, mount)) return null;
   }
   return abs;
 }
@@ -250,15 +283,26 @@ export async function repoRootOfAsync(anchor: string): Promise<string | null> {
 export function projectRootOf(anchor: string): string | null {
   const abs = safeAbs(anchor);
   if (!abs) return null;
-  const wt = abs.indexOf("/.worktrees/");
+  // Searched on a slash-normalised copy: `abs` comes from resolve(), which is
+  // backslashed on Windows, so the literal "/.worktrees/" never matched there
+  // and the strip silently never happened — every session in a `.worktrees/`
+  // layout was attributed to the worktree instead of the project that owns it.
+  // The replace is 1:1, so the index is still valid against the original.
+  const wt = abs.replace(/\\/g, "/").indexOf("/.worktrees/");
   const base = wt === -1 ? abs : abs.slice(0, wt);
   let dir = base;
   try { if (!statSync(base).isDirectory()) dir = dirname(base); } catch { dir = dirname(base); }
   const r = git(dir, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
   if (r.code === 0) {
+    // git answers with forward slashes on Windows; resolve() puts it back into
+    // the platform's own spelling so the value we return compares equal to
+    // paths built anywhere else. `basename` rather than endsWith("/.git") for
+    // the same reason — the separator in git's answer is not ours.
     const common = r.stdout.trim();
-    if (common.endsWith("/.git")) return dirname(common);
-    if (common) return common;
+    if (common) {
+      const nativeCommon = resolve(common);
+      return basename(nativeCommon) === ".git" ? dirname(nativeCommon) : nativeCommon;
+    }
   }
   // Not a repo (or gone): the worktree strip is still a better answer than the
   // raw path, but a plain non-repo directory has no project to roll up to.
@@ -387,7 +431,14 @@ export function commit(root: string, files: string[], title: string, body: strin
   const absRoot = safeAbs(root);
   if (!absRoot) return { ok: false, error: "invalid repo path" };
   const top = git(absRoot, ["rev-parse", "--show-toplevel"]);
-  if (top.code !== 0 || top.stdout.trim() !== absRoot) return { ok: false, error: "not a git repository root" };
+  // Compare RESOLVED paths, not raw strings. On Windows `rev-parse
+  // --show-toplevel` answers with forward slashes (`C:/Users/x/repo`) while
+  // `safeAbs` produces backslashes, so this equality never held there and every
+  // commit was refused as "not a git repository root". resolve() is a no-op on
+  // POSIX, where the two forms already agree.
+  const topAbs = top.code === 0 ? resolve(top.stdout.trim() || ".") : "";
+  const sameRoot = isUnderPath(topAbs, absRoot) && isUnderPath(absRoot, topAbs);
+  if (top.code !== 0 || !sameRoot) return { ok: false, error: "not a git repository root" };
   // The same boundary gitwork's guard() applies to staging, discarding and the
   // Source Control panel's own commit. This is the older commit-composer path
   // and it was the one mutating git endpoint that never checked: a cockpit

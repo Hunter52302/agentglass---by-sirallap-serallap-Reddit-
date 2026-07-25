@@ -1,6 +1,11 @@
 // Shared event + analytics contract between server and web.
 // Keep this file dependency-free so both sides can import it.
 
+// Glasses for Argus: the environment tier's own contract lives in ./env.ts so
+// this file stays about agent-reported telemetry. Only the WsFrame member and
+// the "env" ViewId reach in here.
+import type { EnvTick } from "./env.ts";
+
 export type HookEventType =
   | "SessionStart"
   | "SessionEnd"
@@ -390,7 +395,7 @@ export type Liveness = "working" | "stuck" | "lost" | "unknown";
  * *type*; the UI (web/src/components/workspace/views.ts) attaches the icons,
  * labels and hotkeys and re-exports this so both sides name one set.
  */
-export type ViewId = "git" | "diff" | "pr" | "docker" | "term" | "chat";
+export type ViewId = "git" | "diff" | "pr" | "docker" | "term" | "chat" | "env" | "map";
 
 /**
  * A UI-navigation command from an external controller (a Stream Deck, a phone),
@@ -431,7 +436,18 @@ export type WsFrame =
   | { type: "alert"; data: AlertNote }
   /** A UI-navigation command from POST /control, rebroadcast to every client.
    *  It changes what is *shown*, never the fleet. */
-  | { type: "control"; data: ControlCmd };
+  | { type: "control"; data: ControlCmd }
+  /** Glasses for Argus: a COALESCED environment-tier tick — "n things happened,
+   *  most recently at t". Its own frame type (never `event`) because these carry
+   *  no session, no tokens and no cost and must never reach the cockpit's stats.
+   *
+   *  Deliberately a summary rather than the rows themselves. The first version
+   *  broadcast one frame per observation, and with the filesystem tier on a
+   *  single `npm install` is thousands of writes a second — each one serialized
+   *  and fanned out to every client, on the same hot path as agent ingest, for
+   *  data no view actually read. The tick says only that something moved; the
+   *  panels re-read what they show. */
+  | { type: "env"; data: EnvTick };
 
 export interface AlertNote {
   title: string;

@@ -22,6 +22,19 @@ import { join } from "node:path";
 
 const APPCTL = join(import.meta.dir, "..", "..", "electron", "appctl.sh");
 
+/**
+ * Linux only, and not merely POSIX.
+ *
+ * The subject is `electron/appctl.sh`, a shell script that identifies an
+ * install's processes through `/proc/<pid>/exe`. The fixture copies `/bin/sh`
+ * and runs it. None of that exists on Windows, and `/proc` does not exist on
+ * macOS either — there is no version of this that could pass off Linux, and the
+ * Windows path has its own coverage in selfupdate-win32.test.ts. Skipped by
+ * capability so a green run says plainly that it skipped, instead of failing on
+ * a missing `/bin/sh` and reading as a product bug.
+ */
+const LINUX = process.platform === "linux";
+
 /** Wait, inside the shell, for the reopened instance to exist — same reason as
  *  `visible` below, on the other side of the process boundary. */
 const AWAIT_MAIN = 'for _ in $(seq 200); do [ -n "$(main_pids)" ] && break; sleep 0.025; done';
@@ -99,7 +112,7 @@ afterEach(() => {
   for (const pid of spawned.splice(0)) { try { process.kill(pid, 9); } catch { /* already gone */ } }
 });
 
-describe("finding the processes that belong to an install", () => {
+describe.skipIf(!LINUX)("finding the processes that belong to an install", () => {
   test("helpers are not mistaken for the main process", async () => {
     const app = fakeInstall();
     const main = launch(join(app, "agentglass"));
@@ -151,7 +164,7 @@ describe("finding the processes that belong to an install", () => {
   });
 });
 
-describe("stopping it", () => {
+describe.skipIf(!LINUX)("stopping it", () => {
   test("a healthy instance goes on the first signal, with no escalation", async () => {
     const app = fakeInstall();
     const main = launch(join(app, "agentglass"));
@@ -200,7 +213,7 @@ describe("stopping it", () => {
   });
 });
 
-describe("putting back what the install took down", () => {
+describe.skipIf(!LINUX)("putting back what the install took down", () => {
   // An install has to close the running app — it is replacing the files
   // underneath it. Leaving it closed made the normal loop (merge, rebuild,
   // look at the change) end with the window gone, which reads as the rebuild
