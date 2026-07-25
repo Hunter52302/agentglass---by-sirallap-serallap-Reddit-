@@ -1,4 +1,4 @@
-// Glasses for Argus — the filesystem map.
+// Serrallapa for Argus — the filesystem map.
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md.
 //

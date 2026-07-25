@@ -11,6 +11,8 @@ const base = process.env.VITE_DEMO === "1" ? "/agentglass/demo/" : "/";
 export default defineConfig({
   base,
   plugins: [react()],
-  server: { port: 6180, host: true },
-  preview: { port: 6180, host: true },
+  // Do not silently jump to 6181. The UI is paired with one server, and a
+  // second dev command should fail clearly instead of opening a stale copy.
+  server: { port: 6180, host: true, strictPort: true },
+  preview: { port: 6180, host: true, strictPort: true },
 });

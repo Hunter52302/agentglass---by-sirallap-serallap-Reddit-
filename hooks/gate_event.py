@@ -100,7 +100,7 @@ def main():
         "session_id": payload.get("session_id") or "unknown",
         "tool_name": payload.get("tool_name") or "?",
         "tool_input": payload.get("tool_input") or {},
-        # Glasses for Argus: the agent process that spawned this hook. Carried
+        # Serrallapa for Argus: the agent process that spawned this hook. Carried
         # so a redline can escalate from "deny this call" to "stop this actor" —
         # without a pid there is nothing to stop. Ignored by upstream's gate.
         "pid": os.getppid(),

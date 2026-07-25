@@ -1,4 +1,4 @@
-// Glasses for Argus — Argus's own cockpit.
+// Serrallapa for Argus — Argus's own cockpit.
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md at the repo root.
 //
@@ -28,12 +28,14 @@
 // STAND OUT rather than be quietly folded into a labeled column — which is why
 // the suspect band sits across the top and goes red when it has anything in it.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Portal } from "./Portal.tsx";
 import { RedlineEditor } from "./RedlineEditor.tsx";
 import { useDialogs } from "./ConfirmDialog.tsx";
 import { usePoll } from "../lib/usePoll.ts";
 import { api } from "../lib/api.ts";
+import { MapView } from "./MapPanel.tsx";
+import { PathAutocomplete } from "./PathAutocomplete.tsx";
 import type {
   EnvEvent, EnvTierStatus, EnvSummary, ActorLane, SuspectRollup,
   RedlineStatus, KillableGate, ReplayBounds, ReplayState, PtyShell,
@@ -133,7 +135,11 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
   const [tier, setTier] = useState<TierFilter>("all");
   const [focus, setFocus] = useState<string | null>(null);
   const [dirDraft, setDirDraft] = useState("");
+  const [watchError, setWatchError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [surface, setSurface] = useState<"activity" | "map">("activity");
+  const [lanesCollapsed, setLanesCollapsed] = useState(false);
+  const dirRef = useRef<HTMLInputElement>(null);
   const [redlines, setRedlines] = useState<RedlineStatus | null>(null);
   const [held, setHeld] = useState<PendingGate[]>([]);
   const [killable, setKillable] = useState<KillableGate[]>([]);
@@ -185,9 +191,19 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
 
   const toggleFs = async () => {
     if (busy) return;
+    const enabling = !status?.file.enabled;
+    const dir = dirDraft.trim() || status?.file.dir || "";
+    if (enabling && !dir) {
+      setWatchError("Choose a folder first");
+      dirRef.current?.focus();
+      return;
+    }
     setBusy(true);
+    setWatchError("");
     try {
-      await api.envSetWatch({ enabled: !status?.file.enabled, dir: dirDraft || status?.file.dir || null });
+      const result = await api.envSetWatch(enabling ? { enabled: true, dir } : { enabled: false });
+      setStatus(result.status);
+      if (!result.ok) setWatchError(result.error || "Could not change file watching");
       refresh();
     } finally { setBusy(false); }
   };
@@ -201,7 +217,14 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
   const applyDir = async () => {
     if (busy || !dirDraft.trim()) return;
     setBusy(true);
-    try { await api.envSetWatch({ enabled: true, dir: dirDraft.trim() }); refresh(); } finally { setBusy(false); }
+    setWatchError("");
+    try {
+      const result = await api.envSetWatch({ enabled: true, dir: dirDraft.trim() });
+      setStatus(result.status);
+      if (!result.ok) setWatchError(result.error || "That folder cannot be watched");
+      else setDirDraft(result.status.file.dir || dirDraft.trim());
+      refresh();
+    } finally { setBusy(false); }
   };
 
   const shown = useMemo(() => {
@@ -280,22 +303,30 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
           </div>
 
           <div className="flex items-center gap-1.5 ml-auto">
+            <span className="flex items-center gap-0.5 p-0.5 rounded-lg"
+              style={{ background: "var(--bg2)", border: "1px solid color-mix(in srgb, var(--border) 45%, transparent)" }}>
+              {(["activity", "map"] as const).map((item) => (
+                <button key={item} onClick={() => setSurface(item)}
+                  className="px-2 py-0.5 rounded text-[10px]"
+                  style={{
+                    color: surface === item ? "var(--primary-hover)" : "var(--text4)",
+                    background: surface === item ? "color-mix(in srgb, var(--primary) 16%, transparent)" : "transparent",
+                  }}>
+                  {item}
+                </button>
+              ))}
+            </span>
             <span className="text-[10px] shrink-0" style={{ color: "var(--text4)" }}>watching</span>
-            <input
+            <div className="relative" style={{ width: "min(300px, 32vw)" }}>
+            <PathAutocomplete
+              inputRef={dirRef}
               value={dirDraft}
-              onChange={(e) => setDirDraft(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") void applyDir(); }}
-              placeholder={status?.file.dir || "C:/Users/you"}
-              spellCheck={false}
-              className="px-2 py-1 rounded-lg text-[11px] outline-none"
-              style={{
-                width: 300,
-                color: "var(--text2)",
-                background: "var(--bg2)",
-                border: "1px solid color-mix(in srgb, var(--border) 45%, transparent)",
-                fontFamily: "var(--font-mono, ui-monospace)",
-              }}
+              onChange={setDirDraft}
+              onSubmit={() => void applyDir()}
+              placeholder={status?.file.dir || "/Users/you/project"}
             />
+            {watchError && <div className="absolute mt-1 text-[9px]" style={{ color: "var(--error)" }}>{watchError}</div>}
+            </div>
             <button
               onClick={applyDir}
               className="px-2 py-1 rounded-lg text-[11px] transition-opacity hover:opacity-80"
@@ -314,6 +345,12 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
           </div>
         </div>
 
+        {surface === "map" ? (
+          <div className="flex-1 min-h-0">
+            <MapView active={open && surface === "map"} />
+          </div>
+        ) : (
+        <>
         {/* ── stat strip ── */}
         <div className="flex items-center gap-7 px-5 py-3 shrink-0 border-b flex-wrap"
           style={{ borderColor: "color-mix(in srgb, var(--border) 40%, transparent)" }}>
@@ -502,53 +539,59 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
         )}
 
         {/* ── replay scrubber ── */}
-        {!!bounds?.first && !!bounds.last && bounds.last > bounds.first && (
-          <div className="flex items-center gap-3 px-5 py-2 shrink-0 border-b"
+        <div className="flex items-center gap-3 px-5 py-2 shrink-0 border-b"
+          style={{
+            borderColor: "color-mix(in srgb, var(--border) 40%, transparent)",
+            background: replayAt != null ? "color-mix(in srgb, var(--info) 8%, transparent)" : undefined,
+          }}>
+          <button
+            onClick={() => setReplayAt(null)}
+            className="flex items-center gap-1.5 px-2 py-1 rounded-full text-[10px] font-semibold uppercase tracking-wide shrink-0"
             style={{
-              borderColor: "color-mix(in srgb, var(--border) 40%, transparent)",
-              background: replayAt != null ? "color-mix(in srgb, var(--info) 8%, transparent)" : undefined,
-            }}>
-            <span className="text-[10px] uppercase tracking-wide shrink-0"
-              style={{ color: replayAt != null ? "var(--info)" : "var(--text4)" }}>
-              {replayAt != null ? "replaying" : "live"}
-            </span>
-            <input
-              type="range"
-              min={bounds.first}
-              max={bounds.last}
-              step={1000}
-              value={replayAt ?? bounds.last}
-              onChange={(e) => setReplayAt(Number(e.target.value))}
-              className="flex-1 min-w-0"
-              style={{ accentColor: "var(--info)" }}
-              title="Scrub to reconstruct the machine at a past instant"
-            />
-            <span className="text-[10px] tabular-nums shrink-0" style={{ color: "var(--text3)" }}>
-              {new Date(replayAt ?? bounds.last).toLocaleTimeString()}
-            </span>
-            {replayAt != null && (
-              <>
+              color: replayAt == null ? "var(--success)" : "var(--text4)",
+              background: `color-mix(in srgb, ${replayAt == null ? "var(--success)" : "var(--text4)"} 14%, transparent)`,
+              border: `1px solid color-mix(in srgb, ${replayAt == null ? "var(--success)" : "var(--text4)"} 45%, transparent)`,
+            }}
+            title={replayAt == null ? "Following live activity" : "Click to return to live activity"}
+          >
+            <span className="w-1.5 h-1.5 rounded-full" style={{ background: replayAt == null ? "var(--success)" : "var(--text4)" }} />
+            {replayAt == null ? "LIVE" : "Return live"}
+          </button>
+          {!!bounds?.first && !!bounds.last && bounds.last > bounds.first ? (
+            <>
+              <input
+                type="range"
+                min={bounds.first}
+                max={bounds.last}
+                step={1000}
+                value={replayAt ?? bounds.last}
+                onChange={(e) => setReplayAt(Number(e.target.value))}
+                className="flex-1 min-w-0"
+                style={{ accentColor: replayAt == null ? "var(--success)" : "var(--info)" }}
+                title="Scrub to reconstruct the machine at a past instant"
+              />
+              <span className="text-[10px] tabular-nums shrink-0" style={{ color: "var(--text3)" }}>
+                {new Date(replayAt ?? bounds.last).toLocaleTimeString()}
+              </span>
+              {replayAt != null && (
                 <span className="text-[10px] tabular-nums shrink-0" style={{ color: "var(--text4)" }}>
                   {replay?.runtimes.filter((r) => r.running).length ?? 0} up ·{" "}
                   {replay?.connections ?? 0} conns · {replay?.file_writes ?? 0} writes
                 </span>
-                <button onClick={() => setReplayAt(null)}
-                  className="px-2 py-0.5 rounded text-[10px] shrink-0 transition-opacity hover:opacity-80"
-                  style={{ color: "var(--info)", background: "color-mix(in srgb, var(--info) 14%, transparent)" }}>
-                  back to live
-                </button>
-              </>
-            )}
-          </div>
-        )}
-
+              )}
+            </>
+          ) : (
+            <span className="text-[10px]" style={{ color: "var(--text4)" }}>Following current machine activity</span>
+          )}
+        </div>
         {/* ── lanes | feed ── */}
         <div className="flex-1 min-h-0 flex">
-          <div className="w-[290px] shrink-0 border-r overflow-y-auto"
+          {!lanesCollapsed && <div className="w-[290px] min-w-[220px] max-w-[55vw] shrink-0 border-r overflow-y-auto resize-x"
             style={{ borderColor: "color-mix(in srgb, var(--border) 40%, transparent)" }}>
             <div className="px-4 pt-3 pb-2">
-              <h3 className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: "var(--text2)" }}>
+              <h3 className="text-[11px] font-semibold uppercase tracking-wide flex items-center" style={{ color: "var(--text2)" }}>
                 Actors
+                <button onClick={() => setLanesCollapsed(true)} className="ml-auto text-[10px]" title="Collapse actor lanes">◀</button>
               </h3>
               <p className="text-[10px] mt-1 leading-relaxed" style={{ color: "var(--text4)" }}>
                 One lane per thing that did something, with its activity over the last hour.
@@ -597,7 +640,7 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
                 </button>
               );
             })}
-          </div>
+          </div>}
 
           <div className="flex-1 min-w-0 flex flex-col">
             <div className="flex items-center gap-2 px-4 py-2 shrink-0 border-b"
@@ -605,6 +648,13 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
               <h3 className="text-[11px] font-semibold uppercase tracking-wide mr-2" style={{ color: "var(--text2)" }}>
                 Feed
               </h3>
+              {lanesCollapsed && (
+                <button onClick={() => setLanesCollapsed(false)}
+                  className="px-2 py-0.5 rounded text-[10px]"
+                  style={{ color: "var(--primary-hover)", background: "color-mix(in srgb, var(--primary) 14%, transparent)" }}>
+                  show lanes
+                </button>
+              )}
               {(["all", "process", "network", "file", "pty"] as TierFilter[]).map((t) => (
                 <button key={t} onClick={() => setTier(t)}
                   className="px-2 py-0.5 rounded text-[11px] transition-opacity hover:opacity-80"
@@ -662,6 +712,8 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
             </div>
           </div>
         </div>
+        </>
+        )}
       </div>
       <RedlineEditor
         open={redlineEditorOpen}

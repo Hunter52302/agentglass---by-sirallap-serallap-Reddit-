@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// Glasses for Argus — shell recorder.
+// Serrallapa for Argus — shell recorder.
 //
 // Origin: Argus pty/record.js — MIT © 2026 Zac Rieger. Ported to post at
-// Glasses for Argus's /env/pty intake instead of an OTLP log sink.
+// Serrallapa for Argus's /env/pty intake instead of an OTLP log sink.
 //
 // ─────────────────────────────────────────────────────────────────────────────
 // WHY THIS EXISTS ALONGSIDE agentglass's TERMINAL PANEL

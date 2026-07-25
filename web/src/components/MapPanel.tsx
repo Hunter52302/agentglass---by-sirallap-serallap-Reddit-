@@ -1,4 +1,4 @@
-// Glasses for Argus — the filesystem map.
+// Serrallapa for Argus — the filesystem map.
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md at the repo root.
 //
@@ -19,12 +19,14 @@ import { ViewHeader } from "./workspace/ViewHeader.tsx";
 import { usePoll } from "../lib/usePoll.ts";
 import { api } from "../lib/api.ts";
 import type { FsMap, MapNode, MapAgent } from "../../../shared/env.ts";
-import { MapGraph } from "./MapGraph.tsx";
+import { MapGraph, type MapOrientation } from "./MapGraph.tsx";
 
 /** Which renderer. Persisted, because it is a lasting preference about how you
  *  read this — not a per-visit choice. */
 type MapMode = "nodes" | "tree";
 const MODE_KEY = "glasses.map.mode";
+const ORIENTATION_KEY = "glasses.map.orientation";
+const FOLLOW_KEY = "glasses.map.follow";
 
 /** A tree — the filesystem as a place. */
 export function MapIcon({ size = 15 }: { size?: number }) {
@@ -66,6 +68,7 @@ function Row({
   const hot = node.unclaimed > 0;
   return (
     <button
+      data-map-path={node.path}
       onClick={() => onPick(node)}
       onContextMenu={(e) => { e.preventDefault(); onReveal(node.path); }}
       title="Right-click to reveal in your file manager"
@@ -233,8 +236,17 @@ export function MapView({ active }: { active: boolean }) {
   const [mode, setMode] = useState<MapMode>(() => {
     try { return localStorage.getItem(MODE_KEY) === "tree" ? "tree" : "nodes"; } catch { return "nodes"; }
   });
+  const [orientation, setOrientation] = useState<MapOrientation>(() => {
+    try { return localStorage.getItem(ORIENTATION_KEY) === "top-down" ? "top-down" : "left-right"; }
+    catch { return "left-right"; }
+  });
+  const [following, setFollowing] = useState(() => {
+    try { return localStorage.getItem(FOLLOW_KEY) !== "0"; } catch { return true; }
+  });
   const [note, setNote] = useState<string | null>(null);
   useEffect(() => { try { localStorage.setItem(MODE_KEY, mode); } catch { /* private mode */ } }, [mode]);
+  useEffect(() => { try { localStorage.setItem(ORIENTATION_KEY, orientation); } catch { /* private mode */ } }, [orientation]);
+  useEffect(() => { try { localStorage.setItem(FOLLOW_KEY, following ? "1" : "0"); } catch { /* private mode */ } }, [following]);
 
   // Reveal is the one action on this panel, so its failures are surfaced
   // inline rather than only in the console — a right-click that silently does
@@ -288,6 +300,18 @@ export function MapView({ active }: { active: boolean }) {
   const posOf = useCallback((p: string) => nodePos.get(p) ?? null, [nodePos]);
 
   const shownTrails = (map?.agents ?? []).filter((a) => !trailFor || a.session_id === trailFor);
+  const followedAgent = useMemo(() => {
+    const agents = map?.agents ?? [];
+    const selected = trailFor ? agents.find((agent) => agent.session_id === trailFor) : null;
+    return selected ?? [...agents].sort((a, b) => b.last_ts - a.last_ts)[0] ?? null;
+  }, [map?.agents, trailFor]);
+
+  useEffect(() => {
+    if (!following || mode !== "tree" || !followedAgent?.current) return;
+    const escaped = CSS.escape(followedAgent.current);
+    rowsRef.current?.querySelector<HTMLElement>(`[data-map-path="${escaped}"]`)
+      ?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [following, mode, followedAgent?.current, followedAgent?.last_ts]);
 
   return (
     <div className="flex flex-col h-full min-h-0">
@@ -312,6 +336,30 @@ export function MapView({ active }: { active: boolean }) {
                 </button>
               ))}
             </span>
+            <span className="flex items-center gap-0.5 p-0.5 rounded-lg"
+              style={{ background: "var(--bg2)", border: "1px solid color-mix(in srgb, var(--border) 45%, transparent)" }}>
+              {(["left-right", "top-down"] as MapOrientation[]).map((item) => (
+                <button key={item} onClick={() => setOrientation(item)}
+                  className="px-2 py-0.5 rounded text-[10px]"
+                  style={{
+                    color: orientation === item ? "var(--primary-hover)" : "var(--text4)",
+                    background: orientation === item ? "color-mix(in srgb, var(--primary) 16%, transparent)" : "transparent",
+                  }}
+                  title={item === "left-right" ? "Roots on the left" : "Roots at the top"}>
+                  {item === "left-right" ? "left → right" : "top ↓ down"}
+                </button>
+              ))}
+            </span>
+            <button onClick={() => setFollowing((value) => !value)}
+              className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold"
+              style={{
+                color: following ? "var(--success)" : "var(--text4)",
+                border: `1px solid color-mix(in srgb, ${following ? "var(--success)" : "var(--border)"} 45%, transparent)`,
+                background: `color-mix(in srgb, ${following ? "var(--success)" : "var(--text4)"} 12%, transparent)`,
+              }}>
+              <span className="w-1.5 h-1.5 rounded-full" style={{ background: following ? "var(--success)" : "var(--text4)" }} />
+              {following ? "Following live" : "Live paused"}
+            </button>
             <span className="text-[10px]" style={{ color: "var(--text4)" }}>
               {map?.fs_tier_enabled ? "both layers" : "labeled layer only"}
             </span>
@@ -351,6 +399,11 @@ export function MapView({ active }: { active: boolean }) {
               onPick={setPicked}
               picked={picked?.path ?? null}
               onReveal={reveal}
+              orientation={orientation}
+              following={following}
+              onToggleFollowing={() => setFollowing((value) => !value)}
+              focusPath={followedAgent?.current ?? null}
+              focusTick={followedAgent?.last_ts ?? 0}
             />
           ) : (
             <>

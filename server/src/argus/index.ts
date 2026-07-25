@@ -1,4 +1,4 @@
-// Glasses for Argus — agent runtime integrity, provenance, and intervention.
+// Serrallapa for Argus — agent runtime integrity, provenance, and intervention.
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md for provenance.
 //
@@ -203,8 +203,10 @@ export async function setFsWatch({ enabled, dir }: { enabled: boolean; dir?: str
   const target = requested ? canonicalExisting(requested) : null;
   if (!target) {
     console.error("[argus] filesystem observation refused: choose an existing directory");
-    status.file = { enabled: false, available: false, dir: requested };
-    writeSettings({ fs_enabled: false, fs_dir: requested });
+    // A typo must not replace the last working lens. Keep that path available
+    // so the user can turn watching back on after correcting the draft.
+    status.file = { enabled: false, available: false, dir: status.file.dir };
+    writeSettings({ fs_enabled: false });
     return status;
   }
 

@@ -7,7 +7,7 @@
   "type": "module",
   "workspaces": ["server", "web", "electron"],
   "scripts": {
-    "dev": "concurrently -n server,web -c cyan,magenta \"bun run dev:server\" \"bun run dev:web\"",
+    "dev": "concurrently --kill-others-on-fail -n server,web -c cyan,magenta \"bun run dev:server\" \"bun run dev:web\"",
     "dev:server": "cd server && bun run dev",
     "dev:web": "cd web && bun run dev",
     "start": "cd server && bun run start",

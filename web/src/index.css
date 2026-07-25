@@ -58,6 +58,50 @@
 }
 
 @layer components {
+  .cockpit-grid {
+    display: grid;
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    grid-auto-flow: dense;
+    grid-auto-rows: 72px;
+    gap: 0.75rem;
+  }
+  .cockpit-widget {
+    transition: opacity 140ms ease, transform 180ms ease;
+    overflow: hidden;
+  }
+  .cockpit-grid-editing {
+    padding: 8px;
+    border-radius: 16px;
+    background-image:
+      linear-gradient(color-mix(in srgb, var(--primary) 8%, transparent) 1px, transparent 1px),
+      linear-gradient(90deg, color-mix(in srgb, var(--primary) 8%, transparent) 1px, transparent 1px);
+    background-size: 24px 24px;
+    border: 1px dashed color-mix(in srgb, var(--primary) 35%, transparent);
+  }
+  .cockpit-grid-editing .cockpit-widget {
+    animation: cockpit-jiggle 1.8s ease-in-out infinite alternate;
+  }
+  .cockpit-grid-editing .cockpit-widget:nth-child(even) {
+    animation-delay: -0.8s;
+  }
+  .cockpit-grid-editing .cockpit-widget button {
+    font-size: 10px;
+  }
+  @keyframes cockpit-jiggle {
+    from { transform: rotate(-0.12deg); }
+    to { transform: rotate(0.12deg); }
+  }
+  @media (max-width: 1279px) {
+    .cockpit-grid {
+      display: flex;
+      flex-direction: column;
+    }
+    .cockpit-widget {
+      height: 360px;
+      flex: none;
+    }
+  }
+
   /* Animated aurora + grid backdrop */
   .aurora {
     position: fixed;

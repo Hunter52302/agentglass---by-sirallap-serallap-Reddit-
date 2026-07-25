@@ -1,4 +1,4 @@
-// Glasses for Argus — filesystem write observation.
+// Serrallapa for Argus — filesystem write observation.
 //
 // Origin: Argus src/watcher.js — MIT © 2026 Zac Rieger.
 // Ported to TypeScript. Deliberate change from Argus: the chokidar fallback is

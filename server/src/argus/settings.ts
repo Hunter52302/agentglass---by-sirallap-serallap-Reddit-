@@ -1,4 +1,4 @@
-// Glasses for Argus — persisted lens settings.
+// Serrallapa for Argus — persisted lens settings.
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md.
 //

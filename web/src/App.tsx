@@ -43,6 +43,7 @@ import { SettingsModal } from "./components/SettingsModal.tsx";
 import { WhatsNew } from "./components/WhatsNew.tsx";
 import { SessionModal } from "./components/SessionModal.tsx";
 import { ProjectPicker, PICKER_ANSWERED_KEY } from "./components/ProjectPicker.tsx";
+import { CockpitGrid } from "./components/CockpitGrid.tsx";
 
 /**
  * Wrap a setState so a poll that answers the same thing twice doesn't commit.
@@ -516,52 +517,61 @@ export default function App() {
         onOpenProject={() => setProjectOpen(true)}
       />
 
-      <main className="flex-1 min-h-0 p-3 flex flex-col gap-3 overflow-auto tall:overflow-hidden">
-        <div className="shrink-0">
-          <Kpis stats={stats} agents={agents} startedAt={startedAt} epm={epm} />
-        </div>
-
-        {/* Cockpit — fills the viewport on a tall screen; on short laptops it
-            keeps readable panel heights and the page scrolls instead. */}
-        <div className="shrink-0 min-h-0 tall:flex-1 grid grid-cols-1 xl:grid-cols-12 gap-3">
-          <div className="xl:col-span-3 min-w-0 min-h-0 h-[420px] xl:h-[520px] tall:h-auto">
-            <Fleet agents={agents} activeApp={filter.app} onSelect={(a) => setSessionView({ id: a.session_id, app: a.source_app })} />
-          </div>
-
-          {/* Phones: auto-height rows with fixed chart/feed heights — the
-              desktop 520px box clipped Throughput/ToolMix to slivers. */}
-          <div className="xl:col-span-6 min-w-0 min-h-0 grid grid-rows-[auto_400px] sm:grid-rows-[minmax(0,150px)_minmax(0,1fr)] gap-3 h-auto sm:h-[520px] tall:h-auto">
-            <div className="grid grid-cols-1 sm:grid-cols-2 auto-rows-[150px] sm:auto-rows-auto gap-3 min-w-0 min-h-0">
-              <Throughput events={visibleEvents} />
-              <ToolMix events={visibleEvents} />
-            </div>
-            <div className="min-w-0 min-h-0">
-              <Feed events={events} filter={filter} sessionProvider={sessionProvider} onSelect={setSelected} onClearFilter={clearFilters} />
-            </div>
-          </div>
-
-          {/* Radar / Environment / Alerts. The environment panel earns a slot on
-              the watching surface because the runtimes it counts are invisible
-              to every other widget here — they report nothing, so the fleet,
-              the radar and the feed all score them as zero. */}
-          <div className="xl:col-span-3 min-w-0 min-h-0 grid grid-rows-[3fr_2fr_2fr] gap-3 h-[420px] xl:h-[520px] tall:h-auto">
-            <Radar agents={agents} onSelect={(a) => setFilter((f) => ({ ...f, app: a.source_app }))} />
-            <Environment onOpen={() => setArgusOpen(true)} />
-            <Alerts alerts={alerts} agents={agents} onSelectApp={(app) => setFilter((f) => ({ ...f, app }))} />
-          </div>
-        </div>
-
-        {/* Money row — pinned */}
-        <div className="shrink-0 grid grid-cols-1 xl:grid-cols-3 gap-3 h-auto xl:h-[196px]">
-          <CostByModel stats={stats} />
-          <Latency stats={stats} />
-          <Sessions provider={filter.provider} />
-        </div>
-
-        {/* Mission timeline — pinned */}
-        <div className="shrink-0 h-[140px]">
-          <MissionTimeline stats={stats} />
-        </div>
+      <main className="flex-1 min-h-0 p-3 overflow-auto">
+        <CockpitGrid widgets={[
+          {
+            id: "kpis", title: "Overview", width: 12, height: 3,
+            content: <Kpis stats={stats} agents={agents} startedAt={startedAt} epm={epm} />,
+          },
+          {
+            id: "fleet", title: "Fleet", width: 3, height: 7,
+            content: <Fleet agents={agents} activeApp={filter.app}
+              onSelect={(a) => setSessionView({ id: a.session_id, app: a.source_app })} />,
+          },
+          {
+            id: "throughput", title: "Throughput", width: 3, height: 2,
+            content: <Throughput events={visibleEvents} />,
+          },
+          {
+            id: "tool-mix", title: "Tool mix", width: 3, height: 2,
+            content: <ToolMix events={visibleEvents} />,
+          },
+          {
+            id: "feed", title: "Live events", width: 6, height: 5,
+            content: <Feed events={events} filter={filter} sessionProvider={sessionProvider}
+              onSelect={setSelected} onClearFilter={clearFilters} />,
+          },
+          {
+            id: "radar", title: "Radar", width: 3, height: 3,
+            content: <Radar agents={agents}
+              onSelect={(a) => setFilter((f) => ({ ...f, app: a.source_app }))} />,
+          },
+          {
+            id: "environment", title: "Argus", width: 3, height: 2,
+            content: <Environment onOpen={() => setArgusOpen(true)} />,
+          },
+          {
+            id: "alerts", title: "Alerts", width: 3, height: 2,
+            content: <Alerts alerts={alerts} agents={agents}
+              onSelectApp={(app) => setFilter((f) => ({ ...f, app }))} />,
+          },
+          {
+            id: "cost", title: "Cost by model", width: 4, height: 3,
+            content: <CostByModel stats={stats} />,
+          },
+          {
+            id: "latency", title: "Latency", width: 4, height: 3,
+            content: <Latency stats={stats} />,
+          },
+          {
+            id: "sessions", title: "Sessions", width: 4, height: 3,
+            content: <Sessions provider={filter.provider} />,
+          },
+          {
+            id: "timeline", title: "Mission timeline", width: 12, height: 2,
+            content: <MissionTimeline stats={stats} />,
+          },
+        ]} />
       </main>
 
       <EventModal event={selected} onClose={() => setSelected(null)} />

@@ -1,4 +1,4 @@
-// Glasses for Argus — the env_events read models.
+// Serrallapa for Argus — the env_events read models.
 //
 // These are the queries the cockpit reads on every poll, and each one folds an
 // append-only log into a "what is true now" answer. A regression here is silent

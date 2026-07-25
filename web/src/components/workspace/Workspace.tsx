@@ -10,8 +10,6 @@ import { PrView } from "../PrPanel.tsx";
 import { DockerView } from "../DockerPanel.tsx";
 import { TermView, subscribeSessions, liveSessionCount } from "../TerminalPanel.tsx";
 import { ChatView } from "../ChatPanel.tsx";
-import { EnvView } from "../EnvPanel.tsx";
-import { MapView } from "../MapPanel.tsx";
 import { DynamicIsland, NOTCH_BAND } from "./DynamicIsland.tsx";
 
 const BODY = {
@@ -21,8 +19,6 @@ const BODY = {
   docker: DockerView,
   term: TermView,
   chat: ChatView,
-  env: EnvView,
-  map: MapView,
 } as const;
 
 /** One overlay, six views.

@@ -1,8 +1,6 @@
 import type { ComponentType } from "react";
 import type { ViewId } from "../../../../shared/types.ts";
 import { GitIcon, DiffIcon, DockerIcon, TerminalIcon, ChatIcon, PrIcon } from "./icons.tsx";
-import { EnvIcon } from "../EnvPanel.tsx";
-import { MapIcon } from "../MapPanel.tsx";
 
 /** Re-exported from shared so the server (POST /control validation) and the UI
  *  name one set of views. */
@@ -26,8 +24,6 @@ export const VIEWS: ViewDef[] = [
   { id: "docker", label: "Docker", key: "o", icon: DockerIcon, hint: "Containers, logs, stats & actions" },
   { id: "term", label: "Term", key: "t", icon: TerminalIcon, hint: "A real shell in any repo/worktree" },
   { id: "chat", label: "Chat", key: "c", icon: ChatIcon, hint: "Drive a Claude session in any repo/worktree" },
-  { id: "env", label: "Env", key: "e", icon: EnvIcon, hint: "What the machine reveals: AI runtimes and connections that report nothing" },
-  { id: "map", label: "Map", key: "m", icon: MapIcon, hint: "The filesystem as a place — agents positioned on the tree, plus unclaimed writes" },
 ];
 
 export const VIEW_IDS = VIEWS.map((v) => v.id);

@@ -1,4 +1,4 @@
-// Glasses for Argus — the node map.
+// Serrallapa for Argus — the node map.
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md at the repo root.
 //
@@ -28,6 +28,8 @@ export interface LaidNode extends MapNode {
   parent: string | null;
 }
 
+export type MapOrientation = "left-right" | "top-down";
+
 const COL_W = 190; // horizontal distance per depth level
 const ROW_H = 26; // vertical distance per leaf
 
@@ -39,7 +41,10 @@ const ROW_H = 26; // vertical distance per leaf
  * which matters more here than elegance, because the thing being watched is
  * live and a layout that reshuffles is unreadable.
  */
-export function layout(nodes: MapNode[]): { laid: LaidNode[]; width: number; height: number } {
+export function layout(
+  nodes: MapNode[],
+  orientation: MapOrientation = "left-right",
+): { laid: LaidNode[]; width: number; height: number } {
   const byPath = new Map<string, MapNode>(nodes.map((n) => [n.path, n]));
   const children = new Map<string, string[]>();
   const roots: string[] = [];
@@ -78,10 +83,19 @@ export function layout(nodes: MapNode[]): { laid: LaidNode[]; width: number; hei
     const p = pos.get(n.path);
     if (!p) continue;
     const parent = n.path.slice(0, n.path.lastIndexOf("/"));
-    laid.push({ ...n, x: p.x, y: p.y, parent: byPath.has(parent) ? parent : null });
+    laid.push({
+      ...n,
+      x: orientation === "top-down" ? p.y : p.x,
+      y: orientation === "top-down" ? p.x : p.y,
+      parent: byPath.has(parent) ? parent : null,
+    });
   }
   const maxDepth = Math.max(0, ...laid.map((n) => n.depth));
-  return { laid, width: (maxDepth + 1) * COL_W + 240, height: Math.max(nextLeafY, ROW_H) + 40 };
+  const horizontalWidth = (maxDepth + 1) * COL_W + 240;
+  const horizontalHeight = Math.max(nextLeafY, ROW_H) + 40;
+  return orientation === "top-down"
+    ? { laid, width: horizontalHeight, height: horizontalWidth }
+    : { laid, width: horizontalWidth, height: horizontalHeight };
 }
 
 /** Node radius by how much happened there — a busy file is a bigger target. */
@@ -97,7 +111,8 @@ interface Menu {
 }
 
 export function MapGraph({
-  map, colorOf, trailFor, onPick, picked, onReveal,
+  map, colorOf, trailFor, onPick, picked, onReveal, orientation,
+  following, onToggleFollowing, focusPath, focusTick,
 }: {
   map: FsMap;
   colorOf: (id: string) => string;
@@ -105,8 +120,13 @@ export function MapGraph({
   onPick: (n: MapNode) => void;
   picked: string | null;
   onReveal: (path: string) => void;
+  orientation: MapOrientation;
+  following: boolean;
+  onToggleFollowing: () => void;
+  focusPath: string | null;
+  focusTick: number;
 }) {
-  const { laid, width, height } = useMemo(() => layout(map.nodes), [map.nodes]);
+  const { laid, width, height } = useMemo(() => layout(map.nodes, orientation), [map.nodes, orientation]);
   const posOf = useMemo(() => new Map(laid.map((n) => [n.path, n])), [laid]);
 
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -140,13 +160,29 @@ export function MapGraph({
 
   // Fit once per map shape, not per poll: refitting every 4s would fight the
   // user's own pan and zoom.
-  const shapeKey = `${map.nodes.length}:${map.root ?? ""}`;
+  const shapeKey = `${map.nodes.length}:${map.root ?? ""}:${orientation}`;
   const fittedFor = useRef<string | null>(null);
   useEffect(() => {
     if (fittedFor.current === shapeKey) return;
     fittedFor.current = shapeKey;
     doFit();
   }, [shapeKey, doFit]);
+
+  // Following live keeps the most recently active file in the centre. The
+  // timestamp is a dependency so repeated touches on the same file still
+  // recentre after the user has panned away.
+  useEffect(() => {
+    if (!following || !focusPath) return;
+    const node = posOf.get(focusPath);
+    const el = wrapRef.current;
+    if (!node || !el) return;
+    const rect = el.getBoundingClientRect();
+    setView((current) => ({
+      ...current,
+      x: rect.width / 2 - node.x * current.k,
+      y: rect.height / 2 - node.y * current.k,
+    }));
+  }, [following, focusPath, focusTick, posOf]);
 
   useEffect(() => {
     if (!menu) return;
@@ -199,6 +235,10 @@ export function MapGraph({
                 key={"e" + n.path}
                 d={(() => {
                   const p = posOf.get(n.parent!)!;
+                  if (orientation === "top-down") {
+                    const my = (p.y + n.y) / 2;
+                    return `M${p.x} ${p.y} C${p.x} ${my} ${n.x} ${my} ${n.x} ${n.y}`;
+                  }
                   const mx = (p.x + n.x) / 2;
                   return `M${p.x} ${p.y} C${mx} ${p.y} ${mx} ${n.y} ${n.x} ${n.y}`;
                 })()}
@@ -219,6 +259,10 @@ export function MapGraph({
               .map((p, i) => {
                 if (i === 0) return `M${p.x} ${p.y}`;
                 const q = pts[i - 1];
+                if (orientation === "top-down") {
+                  const my = (q.y + p.y) / 2;
+                  return `C${q.x} ${my} ${p.x} ${my} ${p.x} ${p.y}`;
+                }
                 const mx = (q.x + p.x) / 2;
                 return `C${mx} ${q.y} ${mx} ${p.y} ${p.x} ${p.y}`;
               })
@@ -322,6 +366,19 @@ export function MapGraph({
           className="px-2 h-6 rounded text-[10px] transition-opacity hover:opacity-80"
           style={{ background: "var(--bg2)", color: "var(--text3)", border: "1px solid color-mix(in srgb, var(--border) 45%, transparent)" }}>
           fit
+        </button>
+        <button
+          onClick={onToggleFollowing}
+          className="flex items-center gap-1.5 px-2 h-6 rounded text-[10px] font-semibold transition-opacity hover:opacity-80"
+          style={{
+            background: `color-mix(in srgb, ${following ? "var(--success)" : "var(--bg2)"} 14%, var(--bg2))`,
+            color: following ? "var(--success)" : "var(--text4)",
+            border: `1px solid color-mix(in srgb, ${following ? "var(--success)" : "var(--border)"} 45%, transparent)`,
+          }}
+          title={following ? "Stop following current agent files" : "Follow the latest file touched by an agent"}
+        >
+          <span className="w-1.5 h-1.5 rounded-full" style={{ background: following ? "var(--success)" : "var(--text4)" }} />
+          {following ? "LIVE" : "live"}
         </button>
       </div>
 

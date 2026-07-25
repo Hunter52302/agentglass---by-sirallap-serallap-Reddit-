@@ -88,7 +88,7 @@ export function Kpis({
   const healthColor = health >= 80 ? "var(--success)" : health >= 50 ? "var(--warning)" : "var(--error)";
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-[1.5fr_1.1fr_1.4fr] gap-2">
+    <div className="grid grid-cols-1 lg:grid-cols-[1.5fr_1.1fr_1.4fr] gap-2 h-full">
       {/* hero — spend + health lead the eye */}
       {/* flex-wrap: on a phone the sparkline + health ring drop below the
           number instead of crushing it into a three-line label. */}

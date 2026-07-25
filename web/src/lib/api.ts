@@ -216,7 +216,7 @@ const realApi = {
   changes: (limit = 200) => get<{ changes: FileChange[] }>(`/changes?limit=${limit}`),
   session: (id: string) => get<SessionDetail>(`/session?id=${encodeURIComponent(id)}`),
   insights: () => get<{ insights: Insight[] }>(`/insights`),
-  // Glasses for Argus — the environment tier. Separate endpoints because this
+  // Serrallapa for Argus — the environment tier. Separate endpoints because this
   // is a separate table: observations about the machine, not agent telemetry.
   envStatus: () => get<EnvTierStatus>(`/env/status`),
   envSummary: () => get<EnvSummary>(`/env/summary`),
@@ -230,7 +230,7 @@ const realApi = {
     get<EnvEvent[]>(`/env/recent?limit=${limit}${tier ? `&tier=${tier}` : ""}`),
   // Live lens control — no server restart to answer "what is touching my files?"
   envSetWatch: (b: { enabled: boolean; dir?: string | null }) =>
-    post<{ ok: boolean; status: EnvTierStatus }>(`/env/watch`, b),
+    post<{ ok: boolean; status: EnvTierStatus; error?: string }>(`/env/watch`, b),
   envSetScope: (all: boolean) => post<{ ok: boolean; status: EnvTierStatus }>(`/env/scope`, { all }),
   // Redlines: the policy layer + the escalation agentglass's gate cannot do.
   envRedlines: () => get<RedlineStatus>(`/env/redlines`),

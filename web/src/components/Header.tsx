@@ -137,16 +137,13 @@ export function Header({
       style={{ borderBottom: "1px solid color-mix(in srgb, var(--border) 40%, transparent)", background: "color-mix(in srgb, var(--bg2) 94%, var(--bg))", paddingLeft: IS_MAC_DESKTOP ? 76 : undefined }}>
       <div className="flex items-center gap-2.5 shrink-0">
         <motion.span initial={{ rotate: -20, opacity: 0 }} animate={{ rotate: 0, opacity: 1 }} transition={{ type: "spring", stiffness: 200 }} className="flex pointer-events-none">
-          <Logo size={26} title="Glasses for Argus" />
+          <Logo size={26} title="Serrallapa for Argus" />
         </motion.span>
-        {/* Glasses for Argus — the local merge's wordmark. "Glasses" keeps
-            agentglass's half in the accent colour it always had; "Argus" is the
-            environment tier grafted onto it. Upstream branding is untouched
-            everywhere it identifies the PROJECT (repo links, the demo badge) —
-            only the running app's title changes. */}
+        {/* Serrallapa for Argus — the user's wordmark. Argus remains the
+            environment tier; internal package and file names stay compatible. */}
         <div className="leading-none pointer-events-none">
           <div className="text-[16px] font-bold tracking-tight" style={{ color: "var(--text)" }}>
-            <span style={{ color: "var(--primary)" }}>Glasses</span> for Argus
+            <span style={{ color: "var(--primary)" }}>Serrallapa</span> for Argus
           </div>
         </div>
         {/* The project defines what every other number on screen means, so it

@@ -1,4 +1,4 @@
-// Glasses for Argus — scoped containment.
+// Serrallapa for Argus — scoped containment.
 //
 // Origin: Argus src/kill.js — MIT © 2026 Zac Rieger. Ported to TypeScript.
 //
