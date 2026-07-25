@@ -5,6 +5,18 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
 /**
+ * The self-update path this file exercises is POSIX-only by design.
+ *
+ * `selfupdate.ts` refuses on Windows with an actionable message
+ * ("download the latest release to update"), and that refusal is what
+ * selfupdate-win32.test.ts asserts. Running these here would only re-discover
+ * the same refusal in six different disguises, so they skip where the feature
+ * does not exist rather than sit red.
+ */
+const POSIX_UPDATE = process.platform !== "win32";
+
+
+/**
  * The update path, which is the most dangerous code in the app: it runs
  * whatever the tag contains, as the user.
  *
@@ -59,7 +71,7 @@ afterEach(() => {
   for (const d of [remote, work, ...trash.splice(0)]) rmSync(d, { recursive: true, force: true });
 });
 
-describe("self update", () => {
+describe.skipIf(!POSIX_UPDATE)("self update", () => {
   it("orders releases numerically, not lexically", async () => {
     const u = await load();
     // The bug this prevents: "v0.9.0" > "v0.10.0" as strings, so the newest

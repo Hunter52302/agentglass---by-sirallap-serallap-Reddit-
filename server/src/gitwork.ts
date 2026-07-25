@@ -5,7 +5,7 @@
 // every mutating op is gated by AGENTGLASS_GIT_WRITE_DISABLED=1.
 
 import { resolve, basename, relative, dirname, sep, join } from "node:path";
-import { statSync, readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync } from "node:fs";
+import { statSync, readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, cpSync } from "node:fs";
 import { git, gitAsync, safeAbs, repoRootOfAsync, currentBranch } from "./git.ts";
 import { configuredRepoDirs, workspaceRoot, inScope } from "./config.ts";
 import { worktreeParent, gitDir } from "./worktree.ts";
@@ -2056,11 +2056,18 @@ export async function rescueLeftovers(rootIn: string, pathIn: unknown, relsIn: u
     if (!existsSync(from)) { skipped.push({ path: rel, why: "no longer in the worktree" }); continue; }
     try {
       mkdirSync(dirname(to), { recursive: true });
-      // `cp -R` rather than a hand-rolled walk: it is one spawn for a file or a
-      // whole tree, and it preserves what a copy of somebody's notes should
-      // preserve. `-n` is a second refusal to clobber behind the check above.
-      const p = Bun.spawnSync(["cp", "-Rn", from, to], { stdout: "pipe", stderr: "pipe" });
-      if (p.exitCode !== 0) { skipped.push({ path: rel, why: p.stderr?.toString().trim() || "copy failed" }); continue; }
+      // `cpSync` rather than spawning `cp -Rn`.
+      //
+      // There is no `cp` on Windows, so the spawn failed outright and rescuing
+      // anything from a leftover checkout was impossible on that platform — the
+      // one situation where the files are about to be deleted and the copy is
+      // the only thing standing between the user and losing them.
+      //
+      // Same contract as before: `recursive` is `-R`, and `force: false` with
+      // `errorOnExist: true` is `-n`'s refusal to clobber, made loud instead of
+      // silent. The existsSync check below still stands for the same reason it
+      // did against `cp`.
+      cpSync(from, to, { recursive: true, force: false, errorOnExist: true });
       // Look, rather than believe the exit code. `cp -n` returns 0 when it
       // declines to overwrite, and a caller about to delete the original needs
       // "it is there" to mean the file is there. Five screenshots were reported

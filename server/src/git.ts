@@ -119,6 +119,11 @@ export function __resetGitCapForTest(): void {
  */
 const gitTimeoutMs = () => Number(process.env.AGENTGLASS_GIT_TIMEOUT_SECONDS ?? 120) * 1000;
 
+/** How long to keep reading a dead process's pipes before giving up on them.
+ *  Generous for a flush that is already in flight, short enough that a pipe held
+ *  open by a surviving grandchild cannot retire a spawn slot. */
+const PIPE_DRAIN_GRACE_MS = 2000;
+
 async function runGit(cwd: string, args: string[]): Promise<GitResult> {
   const t0 = performance.now();
   // Whose work this is, read while we are still standing inside the caller —
@@ -142,10 +147,38 @@ async function runGit(cwd: string, args: string[]): Promise<GitResult> {
       // this path — prs.ts fetches PR refs from the network through here.
       env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "", SSH_ASKPASS_REQUIRE: "never" },
     });
-    const [stdout, stderr, code] = await Promise.all([
+    // Wait for the PROCESS first, then for its output — with a bound.
+    //
+    // Reading a pipe to EOF waits for every writer to let go of it, and killing
+    // git does not kill what git started. On Windows especially, the timeout
+    // above terminates git itself while the `ssh` it spawned inherits the pipe
+    // and keeps it open; `new Response(proc.stdout).text()` then never resolves.
+    // Verified: with a surviving grandchild the read was still blocked eight
+    // seconds after the child was killed.
+    //
+    // That is not a slow call, it is a permanently pending one — and since every
+    // awaited git holds a slot from the shared spawn pool, each occurrence
+    // retires a slot for the life of the process. Enough of them and nothing in
+    // the app can run git at all: exactly the freeze the pool exists to prevent,
+    // reached from the other side.
+    //
+    // So once the process is gone, whatever has not arrived is not coming from
+    // it. The grace window is for the ordinary case where the last bytes are
+    // still in flight at exit; it is never reached when the pipes close
+    // normally, because the read has already settled by then.
+    const output = Promise.all([
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),
-      proc.exited,
+    ]);
+    const code = await proc.exited;
+    const [stdout, stderr] = await Promise.race([
+      output,
+      new Promise<[string, string]>((r) => {
+        const t = setTimeout(() => r(["", ""]), PIPE_DRAIN_GRACE_MS);
+        // Not unref'd: this resolve is the only thing that can settle the await
+        // when a grandchild holds the pipe. See gate.ts and spawnpool.ts.
+        void t;
+      }),
     ]);
     // Everything after this line is synchronous parsing of what git said, on
     // behalf of whoever asked.

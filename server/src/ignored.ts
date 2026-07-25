@@ -62,12 +62,28 @@ export function markIgnored(paths: string[]): Map<string, boolean> {
       // `--stdin` with one path per line; exit 0 means at least one matched, 1
       // means none did, and both are normal. Anything else (not a repo, git
       // missing) leaves the set empty, i.e. nothing hidden.
-      const r = spawnSync("git", ["-C", root, "check-ignore", "--stdin"], {
-        input: list.join("\n"),
+      // `-z`: NUL-separated in AND out, and crucially UNQUOTED.
+      //
+      // Without it git applies C-style quoting to any path it considers to need
+      // escaping — which on Windows is every path, because they contain
+      // backslashes. It echoed back `"C:\\repo\\dist\\x.js"`, quotes and doubled
+      // separators included, so the Set lookup below never matched and NOTHING
+      // was ever reported as ignored: build output and logs stayed in the very
+      // list this function exists to filter. `-z` also removes the ambiguity of
+      // a path containing a newline.
+      const r = spawnSync("git", ["-C", root, "check-ignore", "-z", "--stdin"], {
+        input: list.join("\0"),
         encoding: "utf8",
         timeout: 5_000,
       });
-      if (r.status === 0 && r.stdout) ignored = new Set(r.stdout.split("\n").filter(Boolean));
+      // Keyed on a slash-normalised form. We hand git native paths
+      // (`C:\repo\dist\x.js`) and it echoes them back in its own spelling
+      // (`C:/repo/dist/x.js`), so a literal Set lookup missed every single time
+      // on Windows and nothing was ever marked ignored — build artefacts and
+      // logs stayed visible in the UI that exists to hide them.
+      if (r.status === 0 && r.stdout) {
+        ignored = new Set(r.stdout.split("\0").filter(Boolean));
+      }
     } catch { /* treat as none ignored */ }
     for (const p of list) {
       const isIgnored = ignored.has(p);

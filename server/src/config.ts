@@ -35,7 +35,7 @@ interface Config {
   terminalDisabled?: boolean;
 }
 
-function load(): Config {
+function load(CONFIG_PATH: string = currentConfigPath()): Config {
   try {
     if (!existsSync(CONFIG_PATH)) return {};
     const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as unknown;
@@ -64,7 +64,34 @@ function load(): Config {
   }
 }
 
-const config = load();
+/**
+ * The parsed config file, re-read when the path it comes from changes.
+ *
+ * `CONFIG_PATH` is computed from XDG_CONFIG_HOME at import, and a plain
+ * `const config = load()` froze the file's CONTENTS at import too — so in
+ * `bun test`, which shares one process across every file, whichever suite
+ * imported this module first decided the config for all of them. A later file
+ * pointing XDG_CONFIG_HOME at its own fixture still got the earlier one's
+ * settings, silently: an inherited `root` scoped a suite that had deliberately
+ * unscoped itself, and its rows vanished from every scoped query.
+ *
+ * Keyed on the resolved path for exactly the reason workspaceRoot() documents
+ * below. In a real server the path never changes, so this costs one string
+ * comparison.
+ */
+let configFor: string | undefined;
+let configCache: Config = {};
+function currentConfigPath(): string {
+  return join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "agentglass", "config.json");
+}
+function cfg(): Config {
+  const path = currentConfigPath();
+  if (configFor !== path) {
+    configFor = path;
+    configCache = load(path);
+  }
+  return configCache;
+}
 
 const expand = (p: string) => (p.startsWith("~/") ? join(homedir(), p.slice(2)) : p);
 
@@ -93,7 +120,7 @@ const expand = (p: string) => (p.startsWith("~/") ? join(homedir(), p.slice(2)) 
 let cachedRoot: string | null | undefined;
 let cachedFor: string | undefined;
 export function workspaceRoot(): string | null {
-  const asked = process.env.AGENTGLASS_ROOT || config.root;
+  const asked = process.env.AGENTGLASS_ROOT || cfg().root;
   // Keyed on what was asked for, not merely "have we answered before". The
   // scope never changes in a running server, so this costs one comparison —
   // but `bun test` shares a process, and the first suite to call this used to
@@ -256,7 +283,7 @@ export function setWorkspaceRoot(rootIn: string | null): { ok: boolean; workspac
  */
 export function chatBypassAllowed(): boolean {
   if (process.env.AGENTGLASS_CHAT_BYPASS !== undefined) return process.env.AGENTGLASS_CHAT_BYPASS === "1";
-  return config.chatBypass === true;
+  return cfg().chatBypass === true;
 }
 
 /**
@@ -269,7 +296,7 @@ export function terminalDisabledSource(): "env" | "config" | null {
   if (process.env.AGENTGLASS_TERMINAL_DISABLED !== undefined) {
     return process.env.AGENTGLASS_TERMINAL_DISABLED === "1" ? "env" : null;
   }
-  return config.terminalDisabled === true ? "config" : null;
+  return cfg().terminalDisabled === true ? "config" : null;
 }
 
 export function configuredRepoDirs(): string[] {
@@ -278,7 +305,7 @@ export function configuredRepoDirs(): string[] {
   // or hold non-string entries. Guard before mapping: an unguarded `.map(expand)`
   // threw a TypeError that broke GET /git/repos in the default whole-machine mode
   // — a single typo in config.json taking out the repo picker for the machine.
-  const raw = fromEnv.length ? fromEnv : config.repoDirs ?? [];
+  const raw = fromEnv.length ? fromEnv : cfg().repoDirs ?? [];
   const dirs = Array.isArray(raw) ? raw.filter((d): d is string => typeof d === "string") : [];
   return dirs.map(expand);
 }
