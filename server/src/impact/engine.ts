@@ -10,7 +10,7 @@ import type {
   WorkloadClass,
 } from "../../../shared/impact.ts";
 import type { TokenUsage } from "../pricing.ts";
-import { IMPACT_PROFILES, REGIONAL_WATER_FACTORS } from "./profiles.ts";
+import { ACTIVE_IMPACT_PROFILES, REGIONAL_WATER_FACTORS } from "./profiles.ts";
 
 export const DEFAULT_IMPACT_SETTINGS: ImpactSettings = {
   display_mode: "cost",
@@ -89,16 +89,16 @@ export function resolveImpactProfile(
   provider: string | null,
   workloadClass: WorkloadClass,
   settings: ImpactSettings,
-  profiles: readonly ImpactProfile[] = IMPACT_PROFILES,
+  profiles: readonly ImpactProfile[] = ACTIVE_IMPACT_PROFILES,
 ): ImpactProfile | null {
   if (settings.profile_behavior === "selected_proxy" && settings.proxy_profile_id) {
     return profiles.find((p) => p.profile_id === settings.proxy_profile_id) ?? null;
   }
   if (!provider || !model) return null;
-  const key = `${provider}|${model.toLowerCase()}|${workloadClass}|${settings.boundary}|${profiles === IMPACT_PROFILES ? "builtin" : "custom"}`;
-  if (profiles === IMPACT_PROFILES && resolutionCache.has(key)) return resolutionCache.get(key) ?? null;
+  const key = `${provider}|${model.toLowerCase()}|${workloadClass}|${settings.boundary}|${profiles === ACTIVE_IMPACT_PROFILES ? "active" : "custom"}`;
+  if (profiles === ACTIVE_IMPACT_PROFILES && resolutionCache.has(key)) return resolutionCache.get(key) ?? null;
   const m = model.toLowerCase();
-  const candidates = profiles.filter((p) =>
+  const matching = profiles.filter((p) =>
     p.default_enabled
     && p.provider.toLowerCase() === provider.toLowerCase()
     && p.workload_class === workloadClass
@@ -106,16 +106,25 @@ export function resolveImpactProfile(
     && scopeMatches(p, settings.boundary)
     && (settings.lifecycle_enabled || !p.scopes_included.includes(3))
   );
+  const latest = new Map<string, ImpactProfile>();
+  for (const candidate of matching) {
+    const prior = latest.get(candidate.profile_id);
+    if (!prior || candidate.profile_version.localeCompare(prior.profile_version, undefined, { numeric: true }) > 0) {
+      latest.set(candidate.profile_id, candidate);
+    }
+  }
+  const candidates = [...latest.values()];
   candidates.sort((a, b) => {
     // Source-native chooses published/non-scenario data. Explicit operational
     // mode chooses the profile carrying both operational scopes.
     const scenarioDelta = Number(a.statistic === "scenario") - Number(b.statistic === "scenario");
     if (settings.boundary === "source_native" && scenarioDelta) return scenarioDelta;
     return b.source_tier - a.source_tier
-      || Math.max(...b.model_match.map((x) => x.length)) - Math.max(...a.model_match.map((x) => x.length));
+      || Math.max(...b.model_match.map((x) => x.length)) - Math.max(...a.model_match.map((x) => x.length))
+      || b.profile_version.localeCompare(a.profile_version, undefined, { numeric: true });
   });
   const found = candidates[0] ?? null;
-  if (profiles === IMPACT_PROFILES) resolutionCache.set(key, found);
+  if (profiles === ACTIVE_IMPACT_PROFILES) resolutionCache.set(key, found);
   return found;
 }
 

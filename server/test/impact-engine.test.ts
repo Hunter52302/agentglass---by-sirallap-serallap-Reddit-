@@ -134,7 +134,7 @@ describe("profile version behavior", () => {
   test("resolution returns exact selected version without mutating prior profile objects", () => {
     const oldProfile = IMPACT_PROFILES[0];
     const next: ImpactProfile = { ...oldProfile, profile_version: "2.0.0", central_ml: 9, water_s1_ml: 9 };
-    const registry = [next];
+    const registry = [oldProfile, next];
     const resolved = resolveImpactProfile("gemini-pro", "Google", "short_text", settings(), registry);
     expect(resolved?.profile_version).toBe("2.0.0");
     expect(oldProfile.profile_version).toBe("1.0.0");

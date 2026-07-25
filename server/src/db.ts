@@ -17,7 +17,16 @@ import type {
 import type { NormalizedEvent } from "./ingest.ts";
 import { costUsd, modelLabel } from "./pricing.ts";
 import { workspaceRoot, scopeRoots, isUnderPath } from "./config.ts";
-import { migrateImpact, persistEventImpact } from "./impact/store.ts";
+import {
+  getImpactSettings as readImpactSettings,
+  getImpactSummary as queryImpactSummary,
+  listImpactProfiles as readImpactProfiles,
+  migrateImpact,
+  persistEventImpact,
+  updateImpactSettings as writeImpactSettings,
+  type ImpactQueryFilters,
+} from "./impact/store.ts";
+import type { ImpactSettings, ImpactSummary, ImpactProfile } from "../../shared/impact.ts";
 
 /**
  * Where the database lives.
@@ -678,6 +687,7 @@ export function insertEvent(n: NormalizedEvent): InsertResult {
       { input_tokens: dIn, output_tokens: dOut, cache_creation_tokens: dCw, cache_read_tokens: dCr },
       providerOf,
     );
+    impactStatsCache.clear();
   } catch (error) {
     // Environmental telemetry must never delete or block token/cost telemetry.
     console.warn("[impact] failed to persist estimate:", error);
@@ -1020,6 +1030,40 @@ export function statsSummary(windowMs = 24 * 3600 * 1000, provider?: string): St
   statsCache.set(key, { at: Date.now(), data });
   if (statsCache.size > 64) for (const [k, v] of statsCache) if (Date.now() - v.at >= STATS_TTL_MS) statsCache.delete(k);
   return data;
+}
+
+const IMPACT_STATS_TTL_MS = 1000;
+const impactStatsCache = new Map<string, { at: number; data: ImpactSummary }>();
+
+export function impactSummary(
+  windowMs = 24 * 3600 * 1000,
+  filters: ImpactQueryFilters = {},
+): ImpactSummary {
+  const key = JSON.stringify([windowMs, filters, workspaceRoot() ?? ""]);
+  const hit = impactStatsCache.get(key);
+  if (hit && Date.now() - hit.at < IMPACT_STATS_TTL_MS) return hit.data;
+  const data = queryImpactSummary(db, windowMs, filters, scopeClause());
+  impactStatsCache.set(key, { at: Date.now(), data });
+  if (impactStatsCache.size > 64) {
+    for (const [k, v] of impactStatsCache) {
+      if (Date.now() - v.at >= IMPACT_STATS_TTL_MS) impactStatsCache.delete(k);
+    }
+  }
+  return data;
+}
+
+export function impactSettings(): ImpactSettings {
+  return readImpactSettings(db);
+}
+
+export function setImpactSettings(patch: Partial<ImpactSettings>): ImpactSettings {
+  const result = writeImpactSettings(db, patch);
+  impactStatsCache.clear();
+  return result;
+}
+
+export function impactProfiles(): ImpactProfile[] {
+  return readImpactProfiles(db);
 }
 
 function computeStatsSummary(windowMs: number, provider?: string): StatsSummary {

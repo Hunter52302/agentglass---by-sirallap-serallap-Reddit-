@@ -18,6 +18,10 @@ import {
   ftsText,
   providerOf,
   gateHistory,
+  impactSummary,
+  impactProfiles,
+  impactSettings,
+  setImpactSettings,
 } from "./db.ts";
 import { maybeAlert, setAlertSink } from "./alerts.ts";
 import { getSkills, catalogMarkdown, catalogCsv } from "./skills.ts";
@@ -1180,6 +1184,31 @@ const server = Bun.serve<WsData>({
     if (pathname === "/stats") {
       const windowMs = parseWindowMs(url.searchParams.get("window"));
       return json({ ...statsSummary(windowMs, url.searchParams.get("provider") || undefined), server_started_at: STARTED_AT });
+    }
+    if (pathname === "/impact") {
+      const waterType = url.searchParams.get("water_type");
+      return json(impactSummary(parseWindowMs(url.searchParams.get("window")), {
+        provider: url.searchParams.get("provider"),
+        model: url.searchParams.get("model"),
+        agent: url.searchParams.get("agent"),
+        waterType: waterType === "withdrawal" ? "withdrawal" : waterType === "consumption" ? "consumption" : undefined,
+      }));
+    }
+    if (pathname === "/impact/profiles") return json({ profiles: impactProfiles() });
+    if (pathname === "/impact/settings") {
+      if (req.method === "GET") return json(impactSettings());
+      if (req.method === "POST") {
+        if (!localOrigin(req)) return csrfBlocked();
+        let patch: unknown;
+        try { patch = await req.json(); } catch { return json({ error: "invalid json" }, 400); }
+        if (!patch || typeof patch !== "object" || Array.isArray(patch)) return json({ error: "invalid settings" }, 400);
+        try {
+          return json(setImpactSettings(patch));
+        } catch (error) {
+          return json({ error: String((error as Error).message || error) }, 400);
+        }
+      }
+      return json({ error: "method not allowed" }, 405);
     }
 
     // --- Glasses for Argus: the environment tier ---

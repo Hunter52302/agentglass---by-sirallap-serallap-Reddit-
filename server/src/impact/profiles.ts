@@ -1,4 +1,5 @@
 import type { ImpactProfile, RegionalWaterFactor, WaterScope } from "../../../shared/impact.ts";
+import { readFileSync } from "node:fs";
 
 const GOOGLE_SOURCE = "https://cloud.google.com/blog/products/infrastructure/measuring-the-environmental-impact-of-ai-inference/";
 const LBNL_SOURCE = "https://doi.org/10.71468/P1WC7Q";
@@ -186,3 +187,31 @@ for (const profile of IMPACT_PROFILES) {
   const errors = validateImpactProfile(profile);
   if (errors.length) throw new Error(`invalid impact profile ${profile.profile_id}: ${errors.join("; ")}`);
 }
+
+function customProfiles(): ImpactProfile[] {
+  const path = process.env.AGENTGLASS_IMPACT_PROFILES;
+  if (!path) return [];
+  try {
+    const value = JSON.parse(readFileSync(path, "utf8"));
+    if (!Array.isArray(value)) throw new Error("top level must be an array");
+    const keys = new Set(IMPACT_PROFILES.map((p) => `${p.profile_id}@${p.profile_version}`));
+    return value.map((profile, index) => {
+      const errors = validateImpactProfile(profile);
+      if (errors.length) throw new Error(`entry ${index}: ${errors.join("; ")}`);
+      const key = `${profile.profile_id}@${profile.profile_version}`;
+      if (keys.has(key)) throw new Error(`entry ${index}: ${key} already exists; publish a new version`);
+      keys.add(key);
+      return profile as ImpactProfile;
+    });
+  } catch (error) {
+    console.warn("[impact] custom profile registry rejected:", error);
+    return [];
+  }
+}
+
+/** Built-ins plus validated user profiles. Existing id/version pairs stay
+ * immutable; an override must publish a new version. */
+export const ACTIVE_IMPACT_PROFILES: readonly ImpactProfile[] = [
+  ...IMPACT_PROFILES,
+  ...customProfiles(),
+];
