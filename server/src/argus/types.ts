@@ -32,7 +32,9 @@ export interface ArgusEvent {
   surface: "file" | "token" | "pty" | "gui" | "process" | "network";
   action: string;
   target: string | null;
-  status: "start" | "ok" | "error" | "awaiting_approval";
+  /** `redline` means the observation matched operator policy. It does not imply
+   * the actor was identified or successfully contained. */
+  status: "start" | "ok" | "error" | "awaiting_approval" | "redline";
   payload: Record<string, any>;
 }
 
