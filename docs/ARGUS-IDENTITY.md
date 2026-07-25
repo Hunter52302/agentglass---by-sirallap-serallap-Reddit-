@@ -1,58 +1,81 @@
 # Argus identity boundary
 
-Argus currently has one primary identity and one supporting capability.
+Argus has one primary identity, one supporting capability, and one explicitly
+operator-controlled diagnostic mode.
 
-## Primary: agent-integrity monitor
+## Primary: agent runtime integrity and intervention
 
-Argus compares what an AI agent reports with what the selected project actually
-experiences. It surfaces declared effects, corroborating effects, and
-unattributed project changes without pretending that temporal proximity proves
-causation.
+Argus shows what agents, their shells, and their process trees actually do beneath
+AgentGlass's semantic reports. It may observe recognized agent runtimes, attached
+PTY/shell sessions, spawned processes, project filesystem effects, and relevant
+network metadata. When an agent-associated task crosses an explicit redline,
+Argus may deny the action, stop the task, or stop its process tree.
+
+Containment is not general host administration. A target must be tied to an agent,
+a descendant, an explicitly attached shell, a gated request carrying a PID, or a
+manual operator decision made from Argus evidence.
 
 ## Supporting: development provenance
 
-Within the active AgentGlass workspace, Argus may explain changes produced by
-agents, editors, build tools, package managers, Git, tests, and unknown writers.
-The evidence remains separate from AgentGlass semantic telemetry.
+Argus correlates declared agent actions with actual project effects from agents,
+editors, build tools, package managers, Git, tests, shells, and unattributed
+writers. Temporal proximity is evidence for review, not proof of causation.
+Environment observations remain separate from AgentGlass semantic telemetry.
 
-## Deferred: host-security sensor
+## Operator-expanded diagnostic mode
 
-The following belong to a different product identity and are not part of this
-foundation:
+The user owns the lens. Argus therefore permits deliberate expansion beyond the
+active workspace:
 
-- machine-wide filesystem observation
-- every-process network collection
-- continuous host process inventory by default
-- boot, driver, service, registry, scheduled-task, or persistence monitoring
-- packet contents or decrypted traffic
-- process-tree termination or automatic host enforcement
-- malware, antivirus, EDR, or tamper-proof claims
+- `network: all` may show every process represented in the socket table;
+- the filesystem watcher may be pointed at a parent directory, drive root, or `/`;
+- an existing local, SSH, WSL, PuTTY/plink, or other terminal may be explicitly
+  attached to the shell recorder.
 
-Code retained from earlier experiments must remain disabled unless and until it
-is extracted into a separately reviewed host-security project.
+These modes are never the default. The UI must label them as machine-wide or
+operator-expanded, and observations must not be presented as agent-attributed
+merely because they occurred near an agent session.
+
+## Deferred: persistent endpoint-security platform
+
+The following remain outside the current foundation:
+
+- boot, kernel, driver, firmware, registry-persistence, service, or scheduled-task
+  monitoring;
+- packet contents, TLS interception, keylogging, screen capture, clipboard capture,
+  or arbitrary personal-file contents;
+- automatic malware classification of unrelated software;
+- tamper-proof, antivirus, EDR, or complete-host-protection claims;
+- autonomous termination of unrelated processes without an explicit policy or
+  operator decision.
 
 ## Invariants
 
-1. Agent events and environment observations use separate storage and wire
-   types.
-2. Filesystem observation is opt-in.
-3. Filesystem observation is limited to the active workspace or a descendant.
-4. Unattributed means unknown, not malicious.
-5. Argus may add evidence to a gate decision but does not terminate processes.
-6. Process and network sensors are off by default.
-7. Network scope cannot widen to every host connection.
-8. AgentGlass continues to function when Argus is disabled or unavailable.
+1. Agent events and environment observations use separate storage and wire types.
+2. Filesystem observation is off by default.
+3. AI/agent-relevant network metadata is the normal view; every-process network
+   visibility is an explicit opt-in.
+4. Broader filesystem scope requires the operator to choose the path deliberately.
+5. Unattributed means unknown, not malicious.
+6. PTY/shell recording requires explicit attachment or agent ownership.
+7. Process containment requires agent association, a gated PID, an attached shell,
+   an explicit redline, or direct operator confirmation.
+8. Argus refuses PID 0/1, itself, and its parent.
+9. AgentGlass continues to function when Argus is disabled or unavailable.
+10. Weak observations retain fidelity labels and are never converted into fake
+    sessions, costs, prompts, or tool calls.
 
 ## Product language
 
 Use:
 
-> Argus verifies agent-reported actions against scoped project effects.
+> Argus reveals and contains activity beneath agent self-report, while keeping
+> broader machine visibility under the user's explicit control.
 
 Do not use:
 
-> Argus watches everything on your computer.
+> Argus detects all malicious activity.
 
 or:
 
-> Argus detects all malicious activity.
+> Every event observed near an agent was caused by that agent.
