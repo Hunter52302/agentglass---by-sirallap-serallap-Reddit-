@@ -351,6 +351,35 @@ loop that drowned the exact signal the suspect band exists to show.
 the bare path prefix-matches the `-wal` and `-shm` siblings). Any future sink
 that writes inside a watched tree needs the same treatment.
 
+## Windows: what was broken underneath
+
+Getting the suite green on Windows surfaced eight genuine bugs, most of them
+upstream and none of them Windows-only in principle — Windows just made them
+observable. Recorded because each one has a shape worth recognising again:
+
+| root cause | what it actually broke |
+|---|---|
+| `Bun.spawn` does not reject synchronously for a missing binary on Windows | a `notify-send` ENOENT escaped its try/catch and the dead handle hung the whole test run in the first file |
+| an unref'd timer that something *awaits* never fires under `bun test` on Windows | `gate.ts` and `spawnpool.ts` both deadlocked; a timer nothing can await is not a saving |
+| a hardcoded `"/"` in a path comparison | `resolve()` gives backslashes and git gives forward slashes — and Claude Code reports `project_path` and `cwd` with *different* separators in one payload. Broke the git panel, scope filters and worktree parenting |
+| `process.env.X = undefined` stores the **string** `"undefined"` | truthy, so `Number(x \|\| 500)` skipped its default and produced NaN — the scanner's batch loop stopped progressing and every later transcript test timed out |
+| `db.ts` binds its file at import, transitively | `evidence.ts → transcripts.ts → db.ts` at module load, before any test set `AGENTGLASS_DB`: the suite ran against the developer's **real** database |
+| a killed process's pipe stays open while a grandchild holds it | `runGit` awaited EOF forever after killing git, permanently retiring a spawn-pool slot each time — the freeze the pool exists to prevent |
+| `cp` does not exist on Windows | `rescueLeftovers` could not rescue anything there, at the one moment the originals are about to be deleted |
+| git C-quotes any path containing backslashes | `check-ignore` echoed `"C:\repo\dist\x.js"`, so the lookup never matched and **nothing was ever marked ignored** |
+
+Two more the new Argus tests caught immediately: vLLM's documented launch
+(`python -m vllm.entrypoints…`) never matched its own signature, and GitHub
+tokens (`ghp_…`) were never redacted because the pattern required a hyphen where
+GitHub uses an underscore.
+
+`server/test/preload.ts` now binds a sandbox database, config dir and projects
+dir before any module can load `db.ts` — no test can reach real data again.
+
+Suite: **602 tests across 73 files — 570 pass, 32 skip, 0 fail.** The skips are
+by capability and by name (Linux `/proc`, POSIX-only self-update, WSL automount
+translation, `#!/bin/sh` shims, symlinks needing Developer Mode), never silent.
+
 ## Known limits
 
 - **Blindness is matched by provider, not by process.** Nothing in the OS
