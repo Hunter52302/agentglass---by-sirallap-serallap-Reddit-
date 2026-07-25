@@ -224,10 +224,32 @@ export function MapGraph({
               })
               .join(" ");
             const head = pts[pts.length - 1];
+            // Ids must be valid CSS selectors for mpath's href. Session ids are
+            // uuids today, but sanitising costs nothing and a stray character
+            // would break the animation silently rather than loudly.
+            const pathId = `trail-${a.session_id.replace(/[^a-zA-Z0-9_-]/g, "")}`;
+            // Pace by hops, not a fixed duration: a two-file trail crawling for
+            // six seconds and a twelve-file trail sprinting the same six read as
+            // the same thing, which loses the information the motion carries.
+            const dur = Math.max(1.6, Math.min(9, pts.length * 0.55));
             return (
               <g key={"t" + a.session_id}>
-                <path d={d} fill="none" stroke={color} strokeWidth={2} strokeOpacity={0.5}
+                <path id={pathId} d={d} fill="none" stroke={color} strokeWidth={2} strokeOpacity={0.5}
                   strokeLinecap="round" strokeDasharray="5 4" />
+                {/* Argus animated an agent stepping along its trail rather than
+                    just marking where it stopped. The travelling dot restores
+                    that: it shows DIRECTION — which way through the tree the
+                    session actually moved — that a static marker cannot. */}
+                {pts.length > 1 && (
+                  <circle r={3} fill={color} fillOpacity={0.85}>
+                    <animateMotion dur={`${dur}s`} repeatCount="indefinite" rotate="auto">
+                      <mpath href={`#${pathId}`} />
+                    </animateMotion>
+                    <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.08;0.92;1"
+                      dur={`${dur}s`} repeatCount="indefinite" />
+                  </circle>
+                )}
+                {/* Where it is NOW — the destination the trail leads to. */}
                 <circle cx={head.x} cy={head.y} r={7} fill="none" stroke={color} strokeWidth={1.5}>
                   <animate attributeName="r" values="7;13;7" dur="1.9s" repeatCount="indefinite" />
                   <animate attributeName="opacity" values="0.9;0;0.9" dur="1.9s" repeatCount="indefinite" />

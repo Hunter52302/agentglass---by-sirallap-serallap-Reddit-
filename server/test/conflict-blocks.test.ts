@@ -41,6 +41,8 @@ beforeEach(() => {
   git("init", "-q", "-b", "main");
   git("config", "user.email", "t@example.com");
   git("config", "user.name", "T");
+  // See conflicts.test.ts: byte-exact fixtures must not be rewritten to CRLF.
+  git("config", "core.autocrlf", "false");
   writeFileSync(join(dir, "a.txt"), "seed\n");
   git("add", "-A"); git("commit", "-qm", "seed");
 });

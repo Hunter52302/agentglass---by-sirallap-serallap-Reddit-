@@ -6,8 +6,9 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { completePath, splitPrefix } from "../src/fsbrowse.ts";
+import { CAN_SYMLINK } from "./helpers/capabilities.ts";
 
 let base = "";
 beforeAll(() => {
@@ -18,8 +19,12 @@ beforeAll(() => {
   mkdirSync(join(base, "alavera_app", ".git"));
   writeFileSync(join(base, "a-file.txt"), "not a directory");
   writeFileSync(join(base, "alpha", "secret.env"), "TOKEN=hunter2");
-  symlinkSync(join(base, "alpha"), join(base, "alink"));
-  symlinkSync(join(base, "a-file.txt"), join(base, "afilelink"));
+  // Conditional: on Windows without Developer Mode this throws EPERM, and a
+  // throw here used to kill every other test in the file.
+  if (CAN_SYMLINK) {
+    symlinkSync(join(base, "alpha"), join(base, "alink"));
+    symlinkSync(join(base, "a-file.txt"), join(base, "afilelink"));
+  }
 });
 afterAll(() => rmSync(base, { recursive: true, force: true }));
 
@@ -41,14 +46,21 @@ describe("splitPrefix", () => {
     for (const v of [null, undefined, 42, {}, ["/tmp"]]) expect(splitPrefix(v)).toBeNull();
   });
 
+  // splitPrefix answers with a RESOLVED path, which is native-separator by
+  // definition — `/usr/local` on POSIX, `C:\usr\local` on Windows, where a
+  // rooted "/usr" is resolved against the current drive. Comparing against a
+  // hardcoded forward-slash string only ever passed on POSIX and said nothing
+  // about the behaviour being tested.
+  const R = (p: string) => resolve(p);
+
   test("a trailing slash lists inside; anything else filters the last segment", () => {
-    expect(splitPrefix("/usr/local/")).toEqual({ dir: "/usr/local", partial: "" });
-    expect(splitPrefix("/usr/loc")).toEqual({ dir: "/usr", partial: "loc" });
+    expect(splitPrefix("/usr/local/")).toEqual({ dir: R("/usr/local"), partial: "" });
+    expect(splitPrefix("/usr/loc")).toEqual({ dir: R("/usr"), partial: "loc" });
   });
 
   test("`..` and doubled separators are collapsed, so the listed dir is the real one", () => {
-    expect(splitPrefix("/usr/local/../")).toEqual({ dir: "/usr", partial: "" });
-    expect(splitPrefix("//usr///local/")).toEqual({ dir: "/usr/local", partial: "" });
+    expect(splitPrefix("/usr/local/../")).toEqual({ dir: R("/usr"), partial: "" });
+    expect(splitPrefix("//usr///local/")).toEqual({ dir: R("//usr///local"), partial: "" });
   });
 
   test("~ expands to the home directory; ~otheruser does not", () => {
@@ -63,7 +75,7 @@ describe("completePath", () => {
     const out = names(base + "/");
     expect(out).toContain("alpha");
     expect(out).not.toContain("a-file.txt");
-    expect(out).not.toContain("afilelink"); // a symlink pointing at a file
+    if (CAN_SYMLINK) expect(out).not.toContain("afilelink"); // a symlink pointing at a file
     expect(JSON.stringify(completePath(base + "/"))).not.toContain("hunter2");
   });
 
@@ -91,14 +103,14 @@ describe("completePath", () => {
     expect(names(base + "/node_")).toEqual([]);
   });
 
-  test("symlinked directories are offered — code on another disk is a normal setup", () => {
+  test.skipIf(!CAN_SYMLINK)("symlinked directories are offered — code on another disk is a normal setup", () => {
     expect(names(base + "/")).toContain("alink");
   });
 
   test("an unreadable or missing directory answers empty rather than throwing", () => {
     const out = completePath(base + "/does-not-exist/");
     expect(out.entries).toEqual([]);
-    expect(out.base).toBe(base + "/does-not-exist");
+    expect(out.base).toBe(join(base, "does-not-exist"));
   });
 
   test("paths returned are absolute and joined to the resolved base", () => {

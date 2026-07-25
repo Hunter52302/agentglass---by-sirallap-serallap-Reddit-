@@ -23,7 +23,7 @@ import { maybeAlert, setAlertSink } from "./alerts.ts";
 import { getSkills, catalogMarkdown, catalogCsv } from "./skills.ts";
 import { getInsights } from "./insights.ts";
 import { getUsage } from "./usage.ts";
-import { submitGate, decideGate, pendingGates, awaitGate, restoreGates, GATE_MAX_MS } from "./gate.ts";
+import { submitGate, decideGate, pendingGates, awaitGate, restoreGates, shutdownGates, GATE_MAX_MS } from "./gate.ts";
 import { parseControlCmd } from "./control.ts";
 import { otlpTracesToEvents, otlpLogsToEvents } from "./otlp.ts";
 import { decodeOtlpTraces, decodeOtlpLogs } from "./otlp_pb.ts";
@@ -66,6 +66,7 @@ import { startEnvTier, envTierStatus, setFsWatch, setNetworkScope } from "./argu
 import {
   recentEnvEvents, currentRuntimes, currentConnections, recentFileActivity, envSummary,
   actorLanes, suspectRollup, replayBounds, replayAt, ptyShells, insertEnvEvent,
+  noteAgentPid, pruneAgentPids,
 } from "./argus/store.ts";
 import { buildMap } from "./argus/map.ts";
 import { revealPath, REVEAL_ENABLED } from "./argus/reveal.ts";
@@ -332,8 +333,36 @@ setAlertSink({ broadcast: (a) => broadcast({ type: "alert", data: a }), hasClien
 // persisted to env_events and pushed as its own `env` frame — deliberately not
 // an `event` frame, so nothing here can be mistaken for, or counted as, agent
 // telemetry. The fs tier stays off unless GLASSES_FS_WATCH is set.
+// Coalesce the environment tier's output into at most one tick a second.
+//
+// Per-row broadcast put a frame on the wire for every observation. With the
+// filesystem tier on, one `npm install` is thousands of writes a second — each
+// serialized and fanned out to every client, on the same hot path as agent
+// ingest, for rows no view ever read. The tick says something moved; panels
+// re-read what they show.
+const ENV_TICK_MS = 1000;
+let envPending: { count: number; last_ts: number; tiers: Record<string, number> } | null = null;
+let envTickTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushEnvTick() {
+  envTickTimer = null;
+  if (!envPending) return;
+  const tick = envPending;
+  envPending = null;
+  broadcast({ type: "env", data: tick });
+}
+
 const envTier = startEnvTier({
-  onEvent: (e) => broadcast({ type: "env", data: e }),
+  onEvent: (e) => {
+    if (!envPending) envPending = { count: 0, last_ts: 0, tiers: {} };
+    envPending.count++;
+    if (e.ts > envPending.last_ts) envPending.last_ts = e.ts;
+    envPending.tiers[e.tier] = (envPending.tiers[e.tier] ?? 0) + 1;
+    if (!envTickTimer) {
+      envTickTimer = setTimeout(flushEnvTick, ENV_TICK_MS);
+      (envTickTimer as any).unref?.();
+    }
+  },
   fsDir: workspaceRoot(),
   retentionDays: RETENTION_DAYS,
 });
@@ -568,6 +597,14 @@ const server = Bun.serve<WsData>({
         body = (await req.json()) as IngestBody;
       } catch {
         return json({ error: "invalid json" }, 400);
+      }
+      // Glasses for Argus: the hook volunteers the pid of the agent process
+      // that spawned it. That single fact is what turns the environment tier's
+      // "is this VENDOR reporting?" into "is THIS PROCESS reporting?" — nothing
+      // in a hook payload otherwise carries a pid, and nothing in the OS process
+      // table carries a session id. Optional and ignored by upstream's ingest.
+      if ((body as any)?.pid != null && body?.session_id) {
+        noteAgentPid((body as any).pid, body.session_id, body.source_app);
       }
       if (!body?.source_app || !body?.session_id || !body?.hook_event_type) {
         return json({ error: "source_app, session_id, hook_event_type required" }, 400);
@@ -1490,7 +1527,7 @@ if (gates.restored || gates.expired) {
 // Hang up shells and clean temp dirs on the way out — a bare kill leaves them
 // orphaned. Re-raise so the default disposition still terminates the process.
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
-  process.on(sig, () => { shutdownTerminals(); process.exit(0); });
+  process.on(sig, () => { shutdownTerminals(); shutdownGates(); process.exit(0); });
 }
 
 // Parent-death watchdog: a server must never outlive whoever launched it.
@@ -1524,6 +1561,7 @@ if (process.env.AGENTGLASS_DIE_WITH_PARENT === "1") {
   setInterval(() => {
     if (process.ppid === 1 || process.ppid !== bornUnder || !alive(bornUnder)) {
       shutdownTerminals();
+      shutdownGates();
       process.exit(0);
     }
   }, 3000).unref?.();

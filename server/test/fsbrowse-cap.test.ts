@@ -7,6 +7,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { completePath } from "../src/fsbrowse.ts";
+import { CAN_SYMLINK } from "./helpers/capabilities.ts";
 
 const MAX_ENTRIES = 60; // must match fsbrowse.ts
 let base = "";
@@ -18,7 +19,7 @@ beforeAll(() => {
   for (let i = 0; i < 5; i++) {
     const f = join(base, `0file${i}`);
     writeFileSync(f, "x");
-    symlinkSync(f, join(base, `0link${i}`));
+    if (CAN_SYMLINK) symlinkSync(f, join(base, `0link${i}`));
   }
   // Exactly MAX_ENTRIES real directories, named so they all sort after the links.
   for (let i = 0; i < MAX_ENTRIES; i++) mkdirSync(join(base, `dir${String(i).padStart(2, "0")}`));

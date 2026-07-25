@@ -125,9 +125,13 @@ export const SIGNATURES: Signature[] = [
     provider: 'vllm',
     label: 'vLLM',
     kind: 'model-runtime',
+    // `\b` rather than `(?:\s|$)`. vLLM's documented launch is
+    // `python -m vllm.entrypoints.api_server`, where `vllm` is followed by a
+    // DOT — so requiring whitespace-or-end meant the single most common way to
+    // start vLLM was never detected at all.
     test: (s) =>
-      /(?:^|[/\\\s])vllm(?:\.exe)?(?:\s|$)/i.test(s) ||
-      /python(?:\d+(?:\.\d+)?)?\s+-m\s+vllm(?:\s|$)/i.test(s),
+      /(?:^|[/\\\s])vllm(?:\.exe)?\b/i.test(s) ||
+      /python(?:\d+(?:\.\d+)?)?\s+-m\s+vllm\b/i.test(s),
   },
   {
     runtime: 'mlx-lm',
@@ -146,7 +150,11 @@ export function redactSecrets(s: string): string {
       /((?:api[_-]?key|apikey|token|secret|password|passwd|pwd|authorization|auth|bearer)\s*[=:]\s*)("?)([^\s"']+)\2/gi,
       '$1$2***redacted***$2'
     )
-    .replace(/\b(sk|pk|ghp|gho|xox[baprs])-[A-Za-z0-9_-]{6,}/g, '$1-***redacted***')
+    // Separator is `[-_]`, not `-`. GitHub's tokens are `ghp_…`/`gho_…` with an
+    // UNDERSCORE, so a hyphen-only pattern let every GitHub token through
+    // unredacted — the exact leak this function exists to prevent. OpenAI uses
+    // `sk-` and Slack `xoxb-`, hence both separators.
+    .replace(/\b(sk|pk|ghp|gho|ghu|ghs|ghr|github_pat|xox[baprs])[-_][A-Za-z0-9_-]{6,}/g, '$1_***redacted***')
     .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, 'jwt-***redacted***')
     .slice(0, 400);
 }

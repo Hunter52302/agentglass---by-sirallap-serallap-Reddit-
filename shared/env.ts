@@ -63,9 +63,17 @@ export interface EnvRuntime {
   first_seen: number;
   last_seen: number;
   running: boolean;
-  /** Present in the OS, but nothing from its provider is reporting telemetry.
-   *  This is the number the whole tier exists to produce. */
+  /** Present in the OS, but nothing claims it. The number the tier exists for. */
   blind: boolean;
+  /**
+   * How strongly "it is reporting" is known.
+   *
+   *  process  — a hook reported from this exact pid (or its parent). Exact.
+   *  provider — only that some session of the same vendor is reporting. A
+   *             fallback used when no hook has volunteered a pid at all.
+   *  none     — nothing claims it; this is what `blind` means.
+   */
+  attribution: "process" | "provider" | "none";
   models: Array<{
     name?: string;
     parameter_size?: string | null;
@@ -160,6 +168,9 @@ export interface ActorLane {
   last_ts: number;
   provider: string | null;
   events: EnvEvent[];
+  /** Activity per time bucket across the window, oldest first — the lane's own
+   *  timeline. Counts, not flags, so a burst looks different from a trickle. */
+  buckets: number[];
 }
 
 export interface SuspectRollup {
@@ -235,6 +246,22 @@ export interface PtyShell {
   ended: boolean;
   /** Decoded output, oldest first. */
   output: string;
+}
+
+/**
+ * A coalesced "the environment moved" signal.
+ *
+ * Carries counts, never rows. See the WsFrame comment in types.ts for why:
+ * per-row broadcast turned a busy filesystem into a fan-out storm on the ingest
+ * hot path, for data nothing consumed.
+ */
+export interface EnvTick {
+  /** Observations since the last tick. */
+  count: number;
+  /** Newest observation's timestamp. */
+  last_ts: number;
+  /** How many of each tier, so a view can skip a re-read it does not need. */
+  tiers: Partial<Record<EnvTier, number>>;
 }
 
 export interface EnvTierStatus {

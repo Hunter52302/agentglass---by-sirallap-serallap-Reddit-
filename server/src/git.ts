@@ -387,7 +387,13 @@ export function commit(root: string, files: string[], title: string, body: strin
   const absRoot = safeAbs(root);
   if (!absRoot) return { ok: false, error: "invalid repo path" };
   const top = git(absRoot, ["rev-parse", "--show-toplevel"]);
-  if (top.code !== 0 || top.stdout.trim() !== absRoot) return { ok: false, error: "not a git repository root" };
+  // Compare RESOLVED paths, not raw strings. On Windows `rev-parse
+  // --show-toplevel` answers with forward slashes (`C:/Users/x/repo`) while
+  // `safeAbs` produces backslashes, so this equality never held there and every
+  // commit was refused as "not a git repository root". resolve() is a no-op on
+  // POSIX, where the two forms already agree.
+  const topAbs = top.code === 0 ? resolve(top.stdout.trim() || ".") : "";
+  if (top.code !== 0 || topAbs !== absRoot) return { ok: false, error: "not a git repository root" };
   // The same boundary gitwork's guard() applies to staging, discarding and the
   // Source Control panel's own commit. This is the older commit-composer path
   // and it was the one mutating git endpoint that never checked: a cockpit

@@ -20,6 +20,12 @@ afterEach(() => {
   __resetDockerCapForTest();
 });
 
+// A `#!/bin/sh` shim is how these tests fake the docker binary. Windows does
+// not honour shebangs and will not execute an extensionless file, so the shim
+// can never run there — the technique is POSIX-only, and the code under test is
+// not what fails. Skipped by capability rather than left red.
+const CAN_SHIM = process.platform !== "win32";
+
 describe("docker capability", () => {
   it("reports docker as MISSING when it is not on PATH, and does NOT blame the daemon", async () => {
     // The installer-user case: docker simply is not installed. Bun.which returns
@@ -42,7 +48,7 @@ describe("docker capability", () => {
     if (!cap.available) expect(typeof cap.reason).toBe("string");
   });
 
-  it("re-detects a daemon that dies after its version was cached", async () => {
+  it.skipIf(!CAN_SHIM)("re-detects a daemon that dies after its version was cached", async () => {
     // The bug: a success was cached for good, so a daemon that stopped
     // mid-session still reported a version — a phantom daemon. A fake docker
     // whose answer we flip lets us cache a version, kill the daemon, and confirm
@@ -75,7 +81,7 @@ describe("docker capability", () => {
     rmSync(bin, { recursive: true, force: true });
   });
 
-  it("when docker IS installed, available is decided by the binary, not the daemon", async () => {
+  it.skipIf(!CAN_SHIM)("when docker IS installed, available is decided by the binary, not the daemon", async () => {
     // Conditional on this box actually having docker — unlike git, it may not.
     // When it does, `available` is true whether or not the daemon answers: the
     // (b) daemon-down and (c) OK states both mean "installed", and differ only

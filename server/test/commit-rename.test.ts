@@ -18,6 +18,9 @@ beforeEach(() => {
   git("init", "-q", "-b", "main");
   git("config", "user.email", "t@example.com");
   git("config", "user.name", "T");
+  // See conflicts.test.ts: byte-exact assertions need a fixed line ending, and
+  // a Git-for-Windows default of core.autocrlf=true rewrites checkouts to CRLF.
+  git("config", "core.autocrlf", "false");
   writeFileSync(join(dir, "orig.txt"), "content\n");
   git("add", "-A"); git("commit", "-qm", "seed");
 });

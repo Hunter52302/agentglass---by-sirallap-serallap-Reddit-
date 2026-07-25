@@ -39,8 +39,17 @@ function repoRoot(root: unknown): string | null {
   if (hit && Date.now() - hit.at < ROOT_TTL_MS) return hit.top;
   const top = git(abs, ["rev-parse", "--show-toplevel"]);
   if (top.code !== 0) return null;
-  const t = top.stdout.trim();
-  if (!t) return null;
+  const raw = top.stdout.trim();
+  if (!raw) return null;
+  // Normalize to the platform's own separators before anything compares against
+  // it. On Windows `rev-parse --show-toplevel` answers with FORWARD slashes
+  // (`C:/Users/x/repo`), while `resolve()` — which every caller uses to build
+  // the path it checks — produces backslashes. `inRepo`'s
+  // `abs.startsWith(root + sep)` therefore never matched, and every path-taking
+  // operation in this file (stage, discard, conflict blocks, hunks, commit of a
+  // rename) rejected legitimate files as "invalid path" on that platform.
+  // resolve() is a no-op on POSIX, where the two already agree.
+  const t = resolve(raw);
   if (rootCache.size > 200) rootCache.clear();
   rootCache.set(abs, { at: Date.now(), top: t });
   return t;

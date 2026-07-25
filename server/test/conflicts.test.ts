@@ -18,6 +18,13 @@ beforeAll(async () => {
   run(repo, "init", "-q", "-b", "main");
   run(repo, "config", "user.email", "t@example.com");
   run(repo, "config", "user.name", "t");
+  // Byte-exact assertions below, so never inherit the developer's autocrlf.
+  // On a Git-for-Windows default (core.autocrlf=true) git rewrites checkouts to
+  // CRLF and every exact-content assertion fails for a reason that has nothing
+  // to do with merging. Set per-repo rather than via GIT_CONFIG_* in a preload,
+  // because Bun on Windows does not propagate post-startup process.env changes
+  // to child processes — the env approach silently does nothing there.
+  run(repo, "config", "core.autocrlf", "false");
   const commit = (body: string, msg: string) => {
     writeFileSync(join(repo, "shared.txt"), body);
     run(repo, "add", "-A");

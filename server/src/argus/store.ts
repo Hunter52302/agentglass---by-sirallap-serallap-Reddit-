@@ -71,6 +71,65 @@ export function recentEnvEvents(limit = 200, tier?: EnvTier): EnvEvent[] {
   return (rows as any[]).map(hydrate).reverse();
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Agent pids — what turns "is this vendor reporting?" into "is THIS process
+// reporting?".
+//
+// Nothing in the OS process table carries a session id, and nothing in a hook
+// payload carries a pid, so the two halves could not be joined: a runtime was
+// called attributed if ANY session from the same vendor was reporting. A second
+// UNWIRED Claude Code sitting beside a wired one therefore looked fine, which is
+// precisely the case the tier exists to catch.
+//
+// The fix is for the hook to volunteer the one fact only it knows: the pid of
+// the agent process that spawned it (`os.getppid()`). That is recorded here and
+// matched against the process scan.
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS env_agent_pids (
+  pid        INTEGER PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  source_app TEXT,
+  last_seen  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_env_agent_pids_seen ON env_agent_pids(last_seen);
+`);
+
+const upsertPid = db.prepare(`
+INSERT INTO env_agent_pids (pid, session_id, source_app, last_seen)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(pid) DO UPDATE SET
+  session_id = excluded.session_id,
+  source_app = excluded.source_app,
+  last_seen  = excluded.last_seen
+`);
+
+/** Record that `pid` is an agent process which is actively reporting. */
+export function noteAgentPid(pid: unknown, session_id: string, source_app?: string | null): void {
+  const n = Number(pid);
+  // pid 0/1 are never an agent, and a non-integer is a caller bug rather than
+  // an observation — dropping them keeps the join honest.
+  if (!Number.isInteger(n) || n <= 1) return;
+  try {
+    upsertPid.run(n, String(session_id || "unknown"), source_app ? String(source_app) : null, Date.now());
+  } catch { /* a lost pid is not worth failing an ingest over */ }
+}
+
+/** Pids of agents that have reported within the window. */
+export function reportingPids(windowMs = 15 * 60_000): Set<number> {
+  const rows = db
+    .query(`SELECT pid FROM env_agent_pids WHERE last_seen > ?`)
+    .all(Date.now() - windowMs) as { pid: number }[];
+  return new Set(rows.map((r) => r.pid));
+}
+
+/** Drop pids we have not heard from in a long time, so a machine that has been
+ *  up for weeks does not accumulate dead process ids that could be reused. */
+export function pruneAgentPids(maxAgeMs = 24 * 3600_000): number {
+  const res = db.run(`DELETE FROM env_agent_pids WHERE last_seen < ?`, [Date.now() - maxAgeMs]);
+  return Number(res?.changes ?? 0);
+}
+
 /**
  * Argus provider slug → agentglass provider label.
  *
@@ -135,69 +194,106 @@ export interface RuntimeRow {
   first_seen: number;
   last_seen: number;
   running: boolean;
-  /** true = present in the OS but no telemetry from its provider. The point. */
+  /** true = present in the OS but nothing claims it. The point. */
   blind: boolean;
+  /** How the claim was established — see currentRuntimes(). */
+  attribution: "process" | "provider" | "none";
   models: unknown[];
 }
 
-/** Latest known state per discovered runtime node. */
+/**
+ * Latest known state per discovered runtime node.
+ *
+ * Two queries total, regardless of node count. The first version ran a
+ * latest-row query AND a models query PER NODE — an N+1 that three separate
+ * endpoints called on every poll, so twenty runtimes meant forty-one queries
+ * several times a second. Cost scaled with how much the machine was doing,
+ * which is exactly backwards for a monitor.
+ */
 export function currentRuntimes(): RuntimeRow[] {
+  // Latest lifecycle row per node, resolved in SQL rather than per-node.
+  // Ties on ts are broken by id so the answer is deterministic.
   const rows = db.query(`
-    SELECT node_id,
-           MAX(ts)  AS last_seen,
-           MIN(ts)  AS first_seen,
-           MAX(CASE WHEN action = 'process_discovered' THEN ts END) AS started,
-           MAX(CASE WHEN action = 'process_stopped'    THEN ts END) AS stopped
-      FROM env_events
-     WHERE tier = 'process' AND node_id IS NOT NULL
-     GROUP BY node_id
-     ORDER BY last_seen DESC
+    SELECT e.*, agg.first_seen, agg.last_seen
+      FROM env_events e
+      JOIN (
+        SELECT node_id,
+               MIN(ts) AS first_seen,
+               MAX(ts) AS last_seen,
+               MAX(id) AS pick
+          FROM env_events
+         WHERE tier = 'process' AND node_id IS NOT NULL
+           AND action IN ('process_discovered','process_stopped')
+         GROUP BY node_id
+      ) agg ON agg.pick = e.id
+     ORDER BY agg.last_seen DESC
   `).all() as any[];
 
+  // Every model row for every node, once. Ordered so the fold below is a
+  // simple last-write-wins per (node, model).
+  const modelRows = db.query(`
+    SELECT node_id, action, detail FROM env_events
+     WHERE action IN ('model_loaded','model_unloaded') AND node_id IS NOT NULL
+     ORDER BY ts ASC, id ASC
+  `).all() as any[];
+
+  const loadedByNode = new Map<string, Map<string, unknown>>();
+  for (const m of modelRows) {
+    let d: any = {};
+    try { d = JSON.parse(m.detail || "{}"); } catch { continue; }
+    const model = d.model;
+    if (!model) continue;
+    const key = model.digest || model.name;
+    let loaded = loadedByNode.get(m.node_id);
+    if (!loaded) { loaded = new Map(); loadedByNode.set(m.node_id, loaded); }
+    if (m.action === "model_loaded") loaded.set(key, model);
+    else loaded.delete(key);
+  }
+
   const reporting = reportingProviders();
-  const out: RuntimeRow[] = [];
+  const pids = reportingPids();
 
-  for (const r of rows) {
-    const latest = db.query(`
-      SELECT * FROM env_events
-       WHERE node_id = ? AND tier = 'process' AND action IN ('process_discovered','process_stopped')
-       ORDER BY ts DESC LIMIT 1
-    `).get(r.node_id) as any;
-    if (!latest) continue;
+  return rows.map((r) => {
+    const running = r.action === "process_discovered";
 
-    const running = latest.action === "process_discovered";
-    // Models currently loaded: every model_loaded not since matched by an unload.
-    const modelRows = db.query(`
-      SELECT action, detail, ts FROM env_events
-       WHERE node_id = ? AND action IN ('model_loaded','model_unloaded')
-       ORDER BY ts ASC
-    `).all(r.node_id) as any[];
-    const loaded = new Map<string, unknown>();
-    for (const m of modelRows) {
-      let d: any = {};
-      try { d = JSON.parse(m.detail || "{}"); } catch { /* skip */ }
-      const model = d.model;
-      if (!model) continue;
-      const key = model.digest || model.name;
-      if (m.action === "model_loaded") loaded.set(key, model);
-      else loaded.delete(key);
+    /**
+     * How confidently do we know this process is reporting?
+     *
+     *  "process"  — its own pid, or its parent's, is one a hook reported from.
+     *               Exact: this process, not merely something of its vendor.
+     *  "provider" — only that SOME session of the same vendor is reporting.
+     *               A fallback for when no hook has volunteered a pid, kept so
+     *               an un-hooked setup does not report every runtime as blind.
+     *  "none"     — nothing claims it.
+     *
+     * Process beats provider whenever a pid is available, which is what makes a
+     * second unwired Claude Code beside a wired one show up correctly.
+     */
+    let attribution: "process" | "provider" | "none" = "none";
+    if (r.pid != null && (pids.has(r.pid) || (r.ppid != null && pids.has(r.ppid)))) {
+      attribution = "process";
+    } else if (pids.size === 0 && providerIsReporting(r.provider, reporting)) {
+      // Only fall back when NO pid evidence exists at all. Once hooks are
+      // reporting pids, a vendor match is no longer good enough — that is the
+      // whole point of the upgrade.
+      attribution = "provider";
     }
 
-    out.push({
+    return {
       node_id: r.node_id,
-      label: latest.target,
-      runtime: latest.runtime,
-      provider: latest.provider,
-      runtime_kind: latest.runtime_kind,
-      pid: latest.pid,
+      label: r.target,
+      runtime: r.runtime,
+      provider: r.provider,
+      runtime_kind: r.runtime_kind,
+      pid: r.pid,
       first_seen: r.first_seen,
       last_seen: r.last_seen,
       running,
-      blind: running && !providerIsReporting(latest.provider, reporting),
-      models: [...loaded.values()],
-    });
-  }
-  return out;
+      blind: running && attribution === "none",
+      attribution,
+      models: [...(loadedByNode.get(r.node_id) ?? new Map()).values()],
+    };
+  });
 }
 
 export interface ConnRow {
@@ -214,13 +310,26 @@ export interface ConnRow {
   open: boolean;
 }
 
-/** Currently-open AI-relevant outbound connections, newest first. */
-export function currentConnections(limit = 100): ConnRow[] {
+/**
+ * Currently-open AI-relevant outbound connections, newest first.
+ *
+ * Bounded by time, and it has to be. Determining "still open" means folding
+ * connect/close pairs, and the first version folded EVERY network row ever
+ * recorded on each call — a scan that grows all day, run by two pollers several
+ * times a second. The window is generous (12h by default, far longer than any
+ * real socket) but finite, so cost stops tracking uptime.
+ *
+ * The tradeoff is honest: a connection opened before the window and never
+ * closed is not shown. That is a socket held open for half a day, which the
+ * poller would have re-announced long before now anyway — the adapter re-emits
+ * connects for anything it has not seen.
+ */
+export function currentConnections(limit = 100, windowMs = 12 * 3600_000): ConnRow[] {
   const rows = db.query(`
     SELECT * FROM env_events
-     WHERE tier = 'network'
+     WHERE tier = 'network' AND ts > ?
      ORDER BY ts ASC
-  `).all() as any[];
+  `).all(Date.now() - windowMs) as any[];
 
   const live = new Map<string, ConnRow>();
   for (const r of rows) {
@@ -301,8 +410,9 @@ export interface ActorLane {
   events: EnvEvent[];
 }
 
-export function actorLanes(windowMs = 60 * 60_000, perLane = 8): ActorLane[] {
+export function actorLanes(windowMs = 60 * 60_000, perLane = 8, buckets = 60): ActorLane[] {
   const since = Date.now() - windowMs;
+  const bucketMs = Math.max(1, Math.floor(windowMs / buckets));
   const rows = db
     .query(`SELECT * FROM env_events WHERE ts > ? ORDER BY ts DESC LIMIT 4000`)
     .all(since) as any[];
@@ -329,13 +439,24 @@ export function actorLanes(windowMs = 60 * 60_000, perLane = 8): ActorLane[] {
     const key = `${kind}:${actor}`;
     let lane = lanes.get(key);
     if (!lane) {
-      lane = { actor, kind, tier: e.tier, count: 0, last_ts: 0, provider: e.provider, events: [] };
+      lane = {
+        actor, kind, tier: e.tier, count: 0, last_ts: 0, provider: e.provider,
+        events: [],
+        // One slot per time bucket across the window — the lane's own little
+        // timeline. Counts rather than a boolean so a burst reads differently
+        // from a trickle, which is the whole reason to draw it.
+        buckets: new Array(buckets).fill(0),
+      };
       lanes.set(key, lane);
     }
     lane.count++;
     if (e.ts > lane.last_ts) lane.last_ts = e.ts;
     if (!lane.provider && e.provider) lane.provider = e.provider;
     if (lane.events.length < perLane) lane.events.push(e);
+    // Clamped: a row can arrive a millisecond after `since` was computed, which
+    // would index one past the end.
+    const b = Math.min(buckets - 1, Math.max(0, Math.floor((e.ts - since) / bucketMs)));
+    lane.buckets[b]++;
   }
 
   // Unattributed first — it is the one that should catch your eye, so it does
@@ -395,10 +516,15 @@ export function suspectRollup(windowMs = 60 * 60_000, limit = 40): SuspectRollup
  * Chunks are ordered by `seq` and not by `ts`: several can share a millisecond
  * under a fast flush, and terminal output reassembled out of order is garbage.
  */
-export function ptyShells(limit = 12, maxBytes = 200_000): PtyShell[] {
-  const rows = db.query(`
-    SELECT * FROM env_events WHERE tier = 'pty' ORDER BY ts ASC, id ASC
-  `).all() as any[];
+export function ptyShells(limit = 12, maxBytes = 200_000, maxChunks = 4000): PtyShell[] {
+  // Bounded, and this one bites hardest of all the scans: a pty chunk carries
+  // up to 400KB of base64, so an hour of a chatty shell is tens of megabytes
+  // that the first version re-read and re-decoded on EVERY three-second poll.
+  // Newest chunks are the ones worth having (the tail is what you read), so we
+  // take the most recent N and re-sort ascending for reassembly.
+  const rows = (db.query(`
+    SELECT * FROM env_events WHERE tier = 'pty' ORDER BY ts DESC, id DESC LIMIT ?
+  `).all(maxChunks) as any[]).reverse();
 
   const byAgent = new Map<string, PtyShell & { _parts: Array<{ seq: number; b64: string }> }>();
   for (const r of rows) {

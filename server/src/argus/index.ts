@@ -32,8 +32,9 @@
 import { ProcessAdapter } from "./processes";
 import { NetworkAdapter } from "./network";
 import { startWatcher, type WatcherHandle } from "./watcher";
-import { insertEnvEvent, pruneEnvEvents } from "./store";
+import { insertEnvEvent, pruneEnvEvents, pruneAgentPids } from "./store";
 import { db } from "../db.ts";
+import { readSettings, writeSettings, resolveFlag } from "./settings";
 import type { ArgusEvent, EnvEvent, EnvFidelity, EnvTier } from "./types";
 
 const flag = (name: string, dflt: boolean) => {
@@ -49,14 +50,20 @@ const num = (name: string, dflt: number) => {
 export const ENV_TIER_ENABLED = flag("GLASSES_ENV_TIER", true);
 export const PROCESS_SCAN = flag("GLASSES_PROCESS_SCAN", true);
 export const NETWORK_SCAN = flag("GLASSES_NETWORK_SCAN", true);
+
+// The two lens settings the UI can change are resolved through the persisted
+// store, so a restart keeps what you chose. An explicitly set env var still
+// wins — upstream's own rule (config.ts: "environment variables still win").
+const stored = readSettings();
+
 // OFF by default on purpose — agentglass's author deliberately never taps the
 // filesystem, and this port respects that line until someone opts in.
-export const FS_WATCH = flag("GLASSES_FS_WATCH", false);
+export const FS_WATCH = resolveFlag("GLASSES_FS_WATCH", stored.fs_enabled, false);
 
 const PROCESS_POLL_MS = num("GLASSES_PROCESS_POLL_MS", 5000);
 const NETWORK_POLL_MS = num("GLASSES_NETWORK_POLL_MS", 10000);
 const INCLUDE_CMDLINE = flag("GLASSES_PROCESS_CMDLINE", false);
-const NETWORK_ALL = flag("GLASSES_NETWORK_ALL", false);
+const NETWORK_ALL = resolveFlag("GLASSES_NETWORK_ALL", stored.network_all, false);
 const OLLAMA_URL = process.env.GLASSES_OLLAMA_URL || "http://127.0.0.1:11434";
 
 const TIER_OF: Record<string, EnvTier> = {
@@ -212,6 +219,7 @@ export async function setFsWatch({ enabled, dir }: { enabled: boolean; dir?: str
   fsHandle = null;
   if (!enabled) {
     status.file = { enabled: false, available: false, dir: status.file.dir };
+    writeSettings({ fs_enabled: false });
     return status;
   }
   const target = dir || status.file.dir || process.env.GLASSES_FS_DIR || null;
@@ -220,6 +228,10 @@ export async function setFsWatch({ enabled, dir }: { enabled: boolean; dir?: str
     return status;
   }
   startFsWatcher(target);
+  // Remembered so the tier is still watching after a restart, which is the
+  // whole point — a monitor that quietly forgets it was monitoring is worse
+  // than one that was never switched on.
+  writeSettings({ fs_enabled: true, fs_dir: target });
   return status;
 }
 
@@ -227,6 +239,7 @@ export async function setFsWatch({ enabled, dir }: { enabled: boolean; dir?: str
 export function setNetworkScope(all: boolean): EnvTierStatus {
   status.network.all = all;
   netAdapter?.setAll(all);
+  writeSettings({ network_all: all });
   return status;
 }
 
@@ -273,7 +286,7 @@ export function startEnvTier({ onEvent, fsDir, retentionDays = 0 }: StartEnvTier
   }
 
   // Remembered so a later enable has somewhere to point even before one is picked.
-  status.file.dir = fsDir || process.env.GLASSES_FS_DIR || null;
+  status.file.dir = process.env.GLASSES_FS_DIR || stored.fs_dir || fsDir || null;
   if (FS_WATCH) {
     if (status.file.dir) startFsWatcher(status.file.dir);
     else {
@@ -287,6 +300,9 @@ export function startEnvTier({ onEvent, fsDir, retentionDays = 0 }: StartEnvTier
   if (retentionDays > 0) {
     pruneTimer = setInterval(() => {
       try { pruneEnvEvents(retentionDays); } catch { /* next sweep */ }
+      // Dead pids are worse than useless: the OS reuses process ids, so a
+      // stale entry could eventually vouch for an entirely unrelated process.
+      try { pruneAgentPids(); } catch { /* next sweep */ }
     }, 6 * 3600_000);
   }
 

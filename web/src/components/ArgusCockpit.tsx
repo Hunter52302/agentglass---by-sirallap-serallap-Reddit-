@@ -76,6 +76,34 @@ function Stat({ label, value, tone = "var(--text)" }: { label: string; value: nu
   );
 }
 
+/**
+ * A lane's own timeline.
+ *
+ * Filtering the feed by actor answers "what did it do"; this answers "WHEN".
+ * Rendered as bars rather than a line because the values are counts in discrete
+ * buckets, and a line between them would imply activity in the gaps that did
+ * not happen. Normalised per lane so a quiet actor still shows its own shape
+ * instead of being flattened by a noisy neighbour.
+ */
+function LaneSpark({ buckets, color }: { buckets: number[]; color: string }) {
+  if (!buckets?.length) return null;
+  const max = Math.max(...buckets);
+  if (max <= 0) return null;
+  const W = 54, H = 12, n = buckets.length;
+  const bw = W / n;
+  return (
+    <svg width={W} height={H} className="shrink-0" aria-hidden style={{ display: "block" }}>
+      {buckets.map((v, i) =>
+        v > 0 ? (
+          <rect key={i} x={i * bw} y={H - Math.max(1.5, (v / max) * H)}
+            width={Math.max(0.7, bw - 0.35)} height={Math.max(1.5, (v / max) * H)}
+            fill={color} fillOpacity={0.5 + 0.5 * (v / max)} />
+        ) : null
+      )}
+    </svg>
+  );
+}
+
 function Toggle({ on, label, title, onClick }: { on: boolean; label: string; title: string; onClick: () => void }) {
   return (
     <button
@@ -509,7 +537,8 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
                 Actors
               </h3>
               <p className="text-[10px] mt-1 leading-relaxed" style={{ color: "var(--text4)" }}>
-                One lane per thing that did something. Click to filter the feed.
+                One lane per thing that did something, with its activity over the last hour.
+                Click to filter the feed.
               </p>
               {redlines && (
                 <p className="text-[10px] mt-2 leading-relaxed"
@@ -540,6 +569,7 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
                     {l.actor}
                   </span>
                   <span className="ml-auto flex items-center gap-2 shrink-0">
+                    <LaneSpark buckets={l.buckets} color={KIND_COLOR[l.kind]} />
                     <span className="text-[10px] tabular-nums" style={{ color: "var(--text4)" }}>{l.count}</span>
                     <span className="text-[9px] tabular-nums" style={{ color: "var(--text4)" }}>{ago(l.last_ts)}</span>
                   </span>

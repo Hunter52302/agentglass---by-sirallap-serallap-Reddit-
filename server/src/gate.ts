@@ -69,10 +69,27 @@ function finish(id: string, out: GateOutcome, resolution: "human" | "timeout" | 
 /** Arm the expiry timer for a pending request. Anchored to the *original*
  *  deadline, so a reconnect (or a restart) never extends the window. */
 function arm(id: string, expires: number): ReturnType<typeof setTimeout> {
-  const t = setTimeout(() => finish(id, timeoutOutcome(), "timeout"), Math.max(0, expires - Date.now()));
-  // Don't let a held gate keep the process alive on its own.
-  (t as any).unref?.();
-  return t;
+  // Deliberately NOT unref'd, despite the appeal of "don't let a held gate keep
+  // the process alive".
+  //
+  // This timer is the only thing that can settle the promise submitGate returns.
+  // Under `bun test` on Windows (1.3.14) an unref'd timer never fires when it is
+  // the sole pending work, so `await submitGate(...)` deadlocked and hung the
+  // whole suite — verified: the same await completes with a ref'd timer, and an
+  // unref'd one fires fine in a normal process whose loop is kept alive by the
+  // listening socket. A timer nothing can await is not a saving.
+  //
+  // Process exit is handled properly instead: finish() clears the timer on every
+  // resolution path, and shutdownGates() clears any still pending.
+  return setTimeout(() => finish(id, timeoutOutcome(), "timeout"), Math.max(0, expires - Date.now()));
+}
+
+/** Drop every pending timer so a shutting-down process is not held open by a
+ *  gate nobody is going to answer. The rows stay in SQLite and restoreGates()
+ *  picks them up again on the next boot — that is the durability guarantee. */
+export function shutdownGates(): void {
+  for (const w of waiters.values()) clearTimeout(w.timer);
+  waiters.clear();
 }
 
 /** Hold a tool call until decided or the timeout auto-allows. */
