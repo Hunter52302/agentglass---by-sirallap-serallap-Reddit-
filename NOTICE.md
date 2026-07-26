@@ -9,7 +9,7 @@ endorsed by either upstream beyond the licenses below.
 | Component | Origin | Author | License |
 |---|---|---|---|
 | Everything not listed below | [SirAllap/agentglass](https://github.com/SirAllap/agentglass) | David Pallares (SirAllap) | MIT — see [`LICENSE`](LICENSE) |
-| `server/src/argus/**` and the environment-tier UI | [Argus](https://github.com/Hunter52302) | Zac Rieger (Hunter52302) | MIT — see below |
+| `server/src/argus/**` and the environment-tier UI | [Argus](https://github.com/git-Clem) | Zac Rieger (git-Clem) | MIT — see below |
 
 The upstream `LICENSE` file is unmodified and continues to govern all
 agentglass code. Nothing in this file narrows, replaces, or adds conditions to
@@ -32,7 +32,7 @@ unlabeled environment observations into agentglass's labeled agent data.
 
 MIT License
 
-Copyright (c) 2026 Zac Rieger (Hunter52302)
+Copyright (c) 2026 Zac Rieger (git-Clem)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
