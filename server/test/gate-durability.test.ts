@@ -58,12 +58,22 @@ describe("a gate request outlives the process that took it", () => {
   test("a decision is recorded, with who made it", async () => {
     const id = newId();
     const held = gate.submitGate(req({ id }), 60_000);
-    expect(gate.decideGate(id, "deny", "not on my watch")).toBe(true);
+    expect(gate.decideGate(id, "deny", "not on my watch", {
+      id: "a1b2c3d4e5f6",
+      label: "macOS Firefox",
+      browser: "Firefox",
+      platform: "macOS",
+      remote_address: "192.168.1.44",
+      fidelity: "browser_pseudonym",
+    })).toBe(true);
     await expect(held).resolves.toEqual({ decision: "deny", reason: "not on my watch" });
     const row = db.getGate(id)!;
     expect(row.decision).toBe("deny");
     expect(row.resolution).toBe("human");
     expect(row.decided_at).toBeGreaterThan(0);
+    expect(row.decided_client_label).toBe("macOS Firefox");
+    expect(row.decided_client_id).toBe("a1b2c3d4e5f6");
+    expect(row.decided_client_remote).toBe("192.168.1.44");
   });
 
   test("a timeout is an outcome with a record, not a disappearance", async () => {

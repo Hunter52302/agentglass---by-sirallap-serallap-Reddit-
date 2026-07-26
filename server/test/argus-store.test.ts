@@ -217,10 +217,14 @@ describe("actor lanes", () => {
     expect(lanes.find((l) => l.actor === "Ollama")!.kind).toBe("runtime");
     expect(lanes.find((l) => l.actor === "firefox")!.kind).toBe("program");
     // The OS reports no writing pid, so this lane can never be named.
-    expect(lanes.find((l) => l.kind === "unattributed")!.actor).toBe("unattributed");
+    const unknown = lanes.find((l) => l.kind === "unattributed")!;
+    expect(unknown.actor).toBe("writer unknown");
+    expect(unknown.evidence).toBe("filesystem_observer");
+    expect(unknown.confidence).toBe("actor_unknown");
+    expect(lanes.find((l) => l.actor === "firefox")!.evidence).toBe("socket_owner");
   });
 
-  test("unattributed sorts first so it cannot be scrolled past", () => {
+  test("writer-unknown lane sorts first so the evidence gap cannot be scrolled past", () => {
     db.run("DELETE FROM env_events");
     const now = Date.now();
     store.insertEnvEvent(envRow({

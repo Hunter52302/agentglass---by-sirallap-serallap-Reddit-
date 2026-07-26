@@ -302,6 +302,20 @@ CREATE INDEX IF NOT EXISTS idx_gates_pending ON gates(decision, expires);
 CREATE INDEX IF NOT EXISTS idx_gates_created ON gates(created);
 `);
 
+// Decision provenance arrived after durable gates. Keep it flat on the gate:
+// the question is "which client decided this request", not a general device
+// inventory. Older decisions remain honestly unknown.
+for (const [name, type] of [
+  ["decided_client_id", "TEXT"],
+  ["decided_client_label", "TEXT"],
+  ["decided_client_browser", "TEXT"],
+  ["decided_client_platform", "TEXT"],
+  ["decided_client_remote", "TEXT"],
+  ["decided_client_fidelity", "TEXT"],
+]) {
+  try { db.exec(`ALTER TABLE gates ADD COLUMN ${name} ${type}`); } catch { /* already present */ }
+}
+
 export interface GateRow {
   id: string;
   source_app: string;
@@ -314,6 +328,12 @@ export interface GateRow {
   reason: string | null;
   resolution: "human" | "timeout" | "restart" | null;
   decided_at: number | null;
+  decided_client_id: string | null;
+  decided_client_label: string | null;
+  decided_client_browser: string | null;
+  decided_client_platform: string | null;
+  decided_client_remote: string | null;
+  decided_client_fidelity: "browser_pseudonym" | "request_metadata" | null;
 }
 
 const gateInsert = db.query(`
@@ -322,7 +342,13 @@ const gateInsert = db.query(`
 // Only ever resolves a still-pending row: a decision already recorded wins over
 // a late timeout, so a human's approve can't be overwritten by the clock.
 const gateResolve = db.query(`
-  UPDATE gates SET decision = $decision, reason = $reason, resolution = $resolution, decided_at = $decided_at
+  UPDATE gates SET decision = $decision, reason = $reason, resolution = $resolution, decided_at = $decided_at,
+    decided_client_id = $decided_client_id,
+    decided_client_label = $decided_client_label,
+    decided_client_browser = $decided_client_browser,
+    decided_client_platform = $decided_client_platform,
+    decided_client_remote = $decided_client_remote,
+    decided_client_fidelity = $decided_client_fidelity
    WHERE id = $id AND decision IS NULL`);
 const gateById = db.query<GateRow, [string]>(`SELECT * FROM gates WHERE id = ?`);
 const gatesPending = db.query<GateRow, []>(`SELECT * FROM gates WHERE decision IS NULL ORDER BY created ASC`);
@@ -345,8 +371,28 @@ export function resolveGateRow(
   reason: string,
   resolution: "human" | "timeout" | "restart",
   decided_at = Date.now(),
+  client: {
+    id: string | null;
+    label: string;
+    browser: string | null;
+    platform: string | null;
+    remote_address: string | null;
+    fidelity: "browser_pseudonym" | "request_metadata";
+  } | null = null,
 ): void {
-  gateResolve.run({ $id: id, $decision: decision, $reason: reason, $resolution: resolution, $decided_at: decided_at } as any);
+  gateResolve.run({
+    $id: id,
+    $decision: decision,
+    $reason: reason,
+    $resolution: resolution,
+    $decided_at: decided_at,
+    $decided_client_id: client?.id ?? null,
+    $decided_client_label: client?.label ?? null,
+    $decided_client_browser: client?.browser ?? null,
+    $decided_client_platform: client?.platform ?? null,
+    $decided_client_remote: client?.remote_address ?? null,
+    $decided_client_fidelity: client?.fidelity ?? null,
+  } as any);
 }
 
 export function getGate(id: string): GateRow | null {

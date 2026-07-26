@@ -17,6 +17,19 @@ const LEVEL: Record<Alert["level"], { color: string; icon: string }> = {
 const SEV: Record<Insight["severity"], string> = { bad: "var(--error)", warn: "var(--warning)", info: "var(--info)" };
 const KIND_ICON: Record<Insight["kind"], string> = { loop: "↻", spend: "🔥", errors: "✕", burn: "⚡" };
 
+function gateDecisionSource(g: GateRecord): string {
+  if (g.resolution !== "human") {
+    return g.resolution === "restart"
+      ? "Window closed while server was down"
+      : "No decision before timeout";
+  }
+  return [
+    g.decided_client_label || "dashboard client unknown",
+    g.decided_client_id ? `browser profile ${g.decided_client_id.slice(0, 8)}` : "",
+    g.decided_client_remote || "",
+  ].filter(Boolean).join(" · ");
+}
+
 export function Alerts({ alerts, agents = [], onSelectApp, bump }: { alerts: Alert[]; agents?: AgentCard[]; onSelectApp?: (app: string) => void; bump?: number }) {
   const [insights, setInsights] = useState<Insight[]>([]);
   const [acting, setActing] = useState<Record<string, boolean>>({});
@@ -40,15 +53,14 @@ export function Alerts({ alerts, agents = [], onSelectApp, bump }: { alerts: Ale
   }, [bump]);
 
   /*
-   * The gates you didn't decide.
+   * Recent gate outcomes.
    *
    * A request resolved by the timeout — or by a restart that found its window
-   * already closed — used to leave no trace at all: the card simply left the
-   * panel, indistinguishable from one you approved. For the feature whose whole
-   * purpose is human oversight, an outcome nobody chose is the single most
-   * important one to say out loud, so the recent ones stay visible here.
+   * already closed — used to leave no trace at all. Human decisions now stay
+   * here too because their browser-profile provenance would otherwise exist
+   * only in the API. Older rows remain honestly "dashboard client unknown".
    */
-  const [autoResolved, setAutoResolved] = useState<GateRecord[]>([]);
+  const [recentResolved, setRecentResolved] = useState<GateRecord[]>([]);
   useEffect(() => {
     let alive = true;
     const load = () =>
@@ -57,7 +69,7 @@ export function Alerts({ alerts, agents = [], onSelectApp, bump }: { alerts: Ale
         .then((r) => {
           if (!alive) return;
           const cutoff = Date.now() - 30 * 60_000;
-          setAutoResolved(r.gates.filter((g) => g.resolution !== "human" && (g.decided_at ?? 0) > cutoff).slice(0, 3));
+          setRecentResolved(r.gates.filter((g) => (g.decided_at ?? 0) > cutoff).slice(0, 3));
         })
         .catch(() => {});
     load();
@@ -86,7 +98,7 @@ export function Alerts({ alerts, agents = [], onSelectApp, bump }: { alerts: Ale
     [gates, insights, alerts, chats, agents],
   );
   const openCount = attention.length;
-  const empty = openCount === 0 && insights.length === 0 && autoResolved.length === 0;
+  const empty = openCount === 0 && insights.length === 0 && recentResolved.length === 0;
 
   return (
     <Panel
@@ -148,22 +160,22 @@ export function Alerts({ alerts, agents = [], onSelectApp, bump }: { alerts: Ale
           ))}
         </AnimatePresence>
 
-        {autoResolved.length > 0 && (
+        {recentResolved.length > 0 && (
           <div className="mb-2">
-            {autoResolved.map((g) => (
+            {recentResolved.map((g) => (
               <div
                 key={g.id}
                 className="flex items-start gap-2 rounded-xl px-2.5 py-1.5 mb-1.5"
                 style={{ background: "color-mix(in srgb, var(--text4) 10%, transparent)", border: "1px dashed color-mix(in srgb, var(--text4) 45%, transparent)" }}
-                title={g.summary}
+                title={`${g.summary}\n${gateDecisionSource(g)}`}
               >
                 <span className="shrink-0 t-dim2">{g.decision === "deny" ? "✕" : "✓"}</span>
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-[11px]" style={{ color: "var(--text2)" }}>
-                    {g.tool_name} {g.decision === "deny" ? "denied" : "allowed"} without you
+                    {g.tool_name} {g.decision === "deny" ? "denied" : "allowed"}
                   </div>
                   <div className="text-[9.5px] t-dim2 truncate">
-                    {g.resolution === "restart" ? "Window closed while the server was down" : "No decision before the timeout"} · {g.source_app}
+                    {gateDecisionSource(g)} · {g.source_app}
                   </div>
                 </div>
                 <span className="text-[9.5px] t-dim2 shrink-0">{fmtAgo(g.decided_at ?? g.created)}</span>

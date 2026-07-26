@@ -231,6 +231,16 @@ export interface GateRecord extends PendingGate {
   reason: string | null;
   resolution: "human" | "timeout" | "restart" | null;
   decided_at: number | null;
+  /** Browser-profile provenance for a human dashboard decision. This is a
+   * random pseudonym plus low-entropy request metadata, not a physical-device
+   * fingerprint or proof of the person holding it. Null for older rows and
+   * automatic outcomes. */
+  decided_client_id?: string | null;
+  decided_client_label?: string | null;
+  decided_client_browser?: string | null;
+  decided_client_platform?: string | null;
+  decided_client_remote?: string | null;
+  decided_client_fidelity?: "browser_pseudonym" | "request_metadata" | null;
 }
 
 export interface SearchHit {

@@ -151,10 +151,10 @@ export interface FsMap {
  *
  *   runtime       recognized AI process                — named
  *   program       any process holding a socket         — named ("firefox")
- *   unattributed  a file write                         — CANNOT be named
+ *   unattributed  a file write                         — writer CANNOT be named
  *   shell         a recorded terminal                  — named by its operator
  *
- * `unattributed` is a platform fact, not a gap to close later: neither
+ * `unattributed` is a compatibility tag, not a trust verdict: neither
  * ReadDirectoryChangesW nor FSEvents reports the writing process. `shell` sits
  * at the opposite end — a human deliberately attached a recorder to a specific
  * terminal, so it is the only tier whose name is authoritative rather than
@@ -163,6 +163,10 @@ export interface FsMap {
 export interface ActorLane {
   actor: string;
   kind: "runtime" | "program" | "unattributed" | "shell";
+  /** Sensor that supports the actor label. */
+  evidence: "process_table" | "socket_owner" | "filesystem_observer" | "operator_attachment";
+  /** `actor_unknown` means an event happened but its writer was unavailable. */
+  confidence: "observed_actor" | "operator_named" | "actor_unknown";
   tier: EnvTier;
   count: number;
   last_ts: number;

@@ -83,6 +83,7 @@ import { workspaceRoot, setWorkspaceRoot, inScope, CONFIG_PATH } from "./config.
 import { hookStatus, applyHooks } from "./hooksetup.ts";
 import { privateHost } from "./net.ts";
 import { resolveToken, tokenOk, isIntake, isAuthExempt } from "./auth.ts";
+import { clientIdentity } from "./clientIdentity.ts";
 import { updateStatus, startUpdate, updateLog, releaseNotes } from "./selfupdate.ts";
 import { rateOk } from "./ratelimit.ts";
 import { parseWindowMs } from "./params.ts";
@@ -138,7 +139,7 @@ function corsFor(req: Request): Record<string, string> {
     "Access-Control-Allow-Origin": origin || "*",
     Vary: "Origin",
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-    "Access-Control-Allow-Headers": "content-type, authorization",
+    "Access-Control-Allow-Headers": "content-type, authorization, x-agentglass-client-token",
   };
 }
 
@@ -768,7 +769,13 @@ const server = Bun.serve<WsData>({
       if (!localOrigin(req)) return csrfBlocked();
       let b: any = {};
       try { b = await req.json(); } catch { return json({ ok: false }); }
-      const ok = decideGate(String(b.id), b.decision === "deny" ? "deny" : "allow", String(b.reason || ""));
+      const client = clientIdentity(req, srv.requestIP(req)?.address || null);
+      const ok = decideGate(
+        String(b.id),
+        b.decision === "deny" ? "deny" : "allow",
+        String(b.reason || ""),
+        client,
+      );
       return json({ ok });
     }
     // Drive the dashboard's own UI from outside — a Stream Deck, a phone. Unlike

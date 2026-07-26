@@ -20,7 +20,7 @@
 //
 //   runtime       a recognized AI process              — named
 //   program       any process holding a socket         — named ("firefox")
-//   unattributed  a file write                         — CANNOT be named
+//   unattributed  a file write                         — writer CANNOT be named
 //
 // That last one is not a bug to be fixed later. Neither ReadDirectoryChangesW
 // (Windows) nor FSEvents (macOS) reports the writing process, so a file event
@@ -45,7 +45,9 @@ import type { PendingGate } from "../../../shared/types.ts";
 type TierFilter = "all" | "process" | "network" | "file" | "pty";
 
 const KIND_COLOR: Record<ActorLane["kind"], string> = {
-  unattributed: "var(--error)",
+  // Unknown does not mean hostile. Amber marks an evidence gap without turning
+  // ordinary editor/build writes into a red security finding.
+  unattributed: "var(--warning)",
   program: "var(--info)",
   runtime: "var(--success)",
   // A recorded shell is the only actor here whose name a human typed, so it
@@ -230,12 +232,14 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
   const shown = useMemo(() => {
     if (!focus) return feed;
     return feed.filter((e) => {
-      if (focus === "unattributed") return e.tier === "file";
+      if (focus === "writer unknown") return e.tier === "file";
       return e.process_name === focus || e.target === focus || e.runtime === focus;
     });
   }, [feed, focus]);
 
-  const hot = (suspect?.unattributed_writes ?? 0) > 0 || (suspect?.silent_runtimes ?? 0) > 0;
+  const hasUnknownWriters = (suspect?.unattributed_writes ?? 0) > 0;
+  const hasSilentRuntimes = (suspect?.silent_runtimes ?? 0) > 0;
+  const hasEvidenceGap = hasUnknownWriters || hasSilentRuntimes;
   const killableById = useMemo(() => new Map(killable.map((k) => [k.id, k])), [killable]);
 
   const denyAndKill = async (id: string) => {
@@ -360,8 +364,8 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
             tone={summary?.runtimes_blind ? "var(--warning)" : "var(--text)"} />
           <Stat label="actors" value={lanes.length} />
           <Stat label="connections" value={summary?.connections_open ?? "—"} tone="var(--info)" />
-          <Stat label="unattributed writes" value={suspect?.unattributed_writes ?? 0}
-            tone={suspect?.unattributed_writes ? "var(--error)" : "var(--text)"} />
+          <Stat label="writer unknown" value={suspect?.unattributed_writes ?? 0}
+            tone={suspect?.unattributed_writes ? "var(--warning)" : "var(--text)"} />
           <Stat label="distinct paths" value={suspect?.unattributed_paths ?? 0} />
           <span className="text-[10px] ml-auto" style={{ color: "var(--text4)" }}>last hour · {status?.platform}</span>
         </div>
@@ -371,26 +375,29 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
           className="px-5 py-2.5 shrink-0 border-b"
           style={{
             borderColor: "color-mix(in srgb, var(--border) 40%, transparent)",
-            background: hot
-              ? "color-mix(in srgb, var(--error) 9%, transparent)"
+            background: hasEvidenceGap
+              ? "color-mix(in srgb, var(--warning) 9%, transparent)"
               : "color-mix(in srgb, var(--success) 7%, transparent)",
           }}
         >
           <div className="flex items-center gap-3 flex-wrap">
             <span className="text-[11px] font-semibold uppercase tracking-wide shrink-0"
-              style={{ color: hot ? "var(--error)" : "var(--success)" }}>
-              {hot ? "⚠ unclaimed activity" : "✓ nothing unclaimed"}
+              style={{ color: hasEvidenceGap ? "var(--warning)" : "var(--success)" }}>
+              {hasUnknownWriters
+                ? "writer identity unavailable"
+                : hasSilentRuntimes
+                  ? "runtime not reporting"
+                  : "no evidence gaps observed"}
             </span>
             <span className="text-[11px]" style={{ color: "var(--text3)" }}>
               {!status?.file.enabled ? (
                 <>File watching is off — turn it on to see writes nobody reported. Until then this band can only
                   report silent runtimes.</>
               ) : suspect?.unattributed_writes ? (
-                <>{suspect.unattributed_writes} writes across {suspect.unattributed_paths} paths that no agent
-                  reported. The writing process is <em>not knowable</em> from the OS watcher — that is the honest
-                  limit, not a missing feature.</>
+                <>{suspect.unattributed_writes} observed writes across {suspect.unattributed_paths} paths.
+                  This watcher does not receive a writer PID. These events are unknown, not untrusted.</>
               ) : (
-                <>Every write in the watched tree was accounted for.</>
+                <>No filesystem writes with unavailable writer identity were observed in this window.</>
               )}
             </span>
           </div>
@@ -630,8 +637,13 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
                 >
                   <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: KIND_COLOR[l.kind] }} />
                   <span className="truncate"
-                    style={{ color: l.kind === "unattributed" ? "var(--error)" : "var(--text2)" }}>
+                    style={{ color: l.kind === "unattributed" ? "var(--warning)" : "var(--text2)" }}
+                    title={`${l.confidence.replaceAll("_", " ")} · ${l.evidence.replaceAll("_", " ")}`}>
                     {l.actor}
+                  </span>
+                  <span className="text-[8.5px] uppercase tracking-wide shrink-0"
+                    style={{ color: "var(--text4)" }}>
+                    {l.confidence === "actor_unknown" ? "unknown" : l.evidence.replace("_", " ")}
                   </span>
                   <span className="ml-auto flex items-center gap-2 shrink-0">
                     <LaneSpark buckets={l.buckets} color={KIND_COLOR[l.kind]} />

@@ -11,6 +11,7 @@
 // held connection is no longer the only place a pending request exists — a hook
 // whose connection dropped can re-attach with awaitGate(id).
 import type { PendingGate } from "../../shared/types.ts";
+import type { ClientIdentity } from "./clientIdentity.ts";
 import { pushGate } from "./alerts.ts";
 import { recordGate, resolveGateRow, undecidedGates, getGate } from "./db.ts";
 export type GateDecision = "allow" | "deny";
@@ -55,13 +56,18 @@ function timeoutOutcome(): GateOutcome {
 const ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const validGateId = (id: unknown): id is string => typeof id === "string" && ID_RE.test(id);
 
-function finish(id: string, out: GateOutcome, resolution: "human" | "timeout" | "restart"): void {
+function finish(
+  id: string,
+  out: GateOutcome,
+  resolution: "human" | "timeout" | "restart",
+  client: ClientIdentity | null = null,
+): void {
   const w = waiters.get(id);
   if (w) {
     clearTimeout(w.timer);
     waiters.delete(id);
   }
-  resolveGateRow(id, out.decision, out.reason, resolution);
+  resolveGateRow(id, out.decision, out.reason, resolution, Date.now(), client);
   w?.resolve?.(out);
   onChange();
 }
@@ -144,12 +150,17 @@ export function awaitGate(id: string): Promise<GateOutcome> | GateOutcome | null
   return { decision: row.decision, reason: row.reason || "" };
 }
 
-export function decideGate(id: string, decision: GateDecision, reason: string): boolean {
+export function decideGate(id: string, decision: GateDecision, reason: string, client: ClientIdentity | null = null): boolean {
   const row = getGate(id);
   // Decidable while pending, whether or not a connection is currently held: a
   // restored request has no waiter and must still take the operator's answer.
   if (!row || row.decision) return false;
-  finish(id, { decision, reason: reason || (decision === "deny" ? "denied from dashboard" : "approved from dashboard") }, "human");
+  finish(
+    id,
+    { decision, reason: reason || (decision === "deny" ? "denied from dashboard" : "approved from dashboard") },
+    "human",
+    client,
+  );
   return true;
 }
 

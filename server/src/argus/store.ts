@@ -402,6 +402,8 @@ export function envSummary() {
 export interface ActorLane {
   actor: string;
   kind: "runtime" | "program" | "unattributed" | "shell";
+  evidence: "process_table" | "socket_owner" | "filesystem_observer" | "operator_attachment";
+  confidence: "observed_actor" | "operator_named" | "actor_unknown";
   tier: EnvTier;
   count: number;
   last_ts: number;
@@ -424,25 +426,37 @@ export function actorLanes(windowMs = 60 * 60_000, perLane = 8, buckets = 60): A
     const e = hydrate(r);
     let actor: string;
     let kind: ActorLane["kind"];
+    let evidence: ActorLane["evidence"];
+    let confidence: ActorLane["confidence"];
     if (e.tier === "file") {
-      actor = "unattributed";
+      actor = "writer unknown";
+      // Keep the wire tag for extension compatibility. The human-facing actor
+      // name carries the clearer wording.
       kind = "unattributed";
+      evidence = "filesystem_observer";
+      confidence = "actor_unknown";
     } else if (e.tier === "pty") {
       // The operator named this one, so it is used verbatim.
       actor = e.target || "shell";
       kind = "shell";
+      evidence = "operator_attachment";
+      confidence = "operator_named";
     } else if (e.tier === "network") {
       actor = e.process_name || "unknown";
       kind = "program";
+      evidence = "socket_owner";
+      confidence = e.process_name ? "observed_actor" : "actor_unknown";
     } else {
       actor = e.target || e.runtime || "unknown";
       kind = "runtime";
+      evidence = "process_table";
+      confidence = actor === "unknown" ? "actor_unknown" : "observed_actor";
     }
     const key = `${kind}:${actor}`;
     let lane = lanes.get(key);
     if (!lane) {
       lane = {
-        actor, kind, tier: e.tier, count: 0, last_ts: 0, provider: e.provider,
+        actor, kind, evidence, confidence, tier: e.tier, count: 0, last_ts: 0, provider: e.provider,
         events: [],
         // One slot per time bucket across the window — the lane's own little
         // timeline. Counts rather than a boolean so a burst reads differently
@@ -461,7 +475,8 @@ export function actorLanes(windowMs = 60 * 60_000, perLane = 8, buckets = 60): A
     lane.buckets[b]++;
   }
 
-  // Unattributed first — it is the one that should catch your eye, so it does
+  // Unknown writers first — missing causal identity should stay visible, but
+  // the UI presents it as an evidence limit rather than a malicious verdict.
   // not get sorted below whichever runtime happened to be chatty.
   return [...lanes.values()].sort((a, b) => {
     if (a.kind !== b.kind) {

@@ -65,6 +65,22 @@ The following remain outside the current foundation:
 10. Weak observations retain fidelity labels and are never converted into fake
     sessions, costs, prompts, or tool calls.
 
+## Actor labels
+
+Argus keeps actor, destination, and evidence separate:
+
+- a socket-owning PID may be labeled `Firefox -> Google Gemini`;
+- a dashboard browser profile may be recorded as the client that approved a
+  gate decision;
+- a filesystem watcher event remains `writer unknown` when the operating-system
+  API supplied no writer PID.
+
+Browser-profile continuity uses a random local pseudonym. It is not hardware
+fingerprinting and does not prove a physical device, person, tab, or intent.
+Nearby process activity may be shown as context, never rewritten as causation.
+The recorded address is the direct network peer. Argus does not trust forwarded
+address headers from an unspecified proxy.
+
 ## Product language
 
 Use:

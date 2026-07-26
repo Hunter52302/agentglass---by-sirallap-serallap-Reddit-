@@ -93,7 +93,10 @@ Contract:
 - Resolved requests: `GET /gate/history?limit=50`. `resolution` says who decided
   — `human`, `timeout`, or `restart` (the window closed while the server was
   down). The last two are the outcomes nobody chose, which is exactly why they
-  are recorded rather than dropped.
+  are recorded rather than dropped. Browser decisions may also carry
+  `decided_client_*` fields: a hashed browser-profile pseudonym, low-entropy
+  browser/platform label, direct peer address, and fidelity. These identify
+  continuity of one browser profile, not a physical device or person.
 
 Claude Code wiring lives in `hooks/gate_event.py` (see README control-plane
 section). Any harness can long-poll the same endpoint.

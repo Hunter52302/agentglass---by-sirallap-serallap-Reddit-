@@ -258,15 +258,15 @@ export function EnvView({ active }: { active: boolean }) {
         </Section>
 
         <Section
-          title="Unclaimed file activity"
+          title="File activity — writer unknown"
           count={status?.file.enabled ? files.length : undefined}
-          note="Writes on disk that no agent reported. Off by default: agentglass deliberately never taps the filesystem, so this tier stays dark unless you opt in."
+          note="Observed writes whose filesystem event carried no writer PID. Unknown does not mean untrusted. Off by default: this tier stays dark unless you opt in."
         >
           {!status?.file.enabled ? (
             <Empty>
               Filesystem tier is off. Set <code style={{ color: "var(--text2)" }}>GLASSES_FS_WATCH=1</code> and
               restart the server to capture writes in the scoped project. It is off by default on purpose —
-              unclaimed writes arrive unlabeled, which is why they are kept out of the cockpit's data.
+              writer-unknown events arrive unlabeled, which is why they stay separate from agent telemetry.
             </Empty>
           ) : !status.file.available ? (
             <Empty>Recursive filesystem watching is unavailable on this platform, so the tier reported itself off rather than pretending to work.</Empty>

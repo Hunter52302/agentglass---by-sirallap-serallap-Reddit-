@@ -2,6 +2,7 @@ import type { WatchEvent, SessionRollup, StatsSummary, SkillInfo, FileChange, Di
 import type { EnvTierStatus, EnvSummary, EnvRuntime, EnvConnection, EnvEvent, FsMap, ActorLane, SuspectRollup, EnvTier, RedlineRuleInput, RedlineStatus, KillableGate, ReplayBounds, ReplayState, PtyShell } from "../../../shared/env.ts";
 import type { ImpactProfile, ImpactSettings, ImpactSummary } from "../../../shared/impact.ts";
 import * as demo from "./demo.ts";
+import { clientIdentityHeaders } from "./clientIdentity.ts";
 
 export const IS_DEMO = demo.IS_DEMO;
 
@@ -114,8 +115,17 @@ const TOKEN: string = (() => {
 })();
 
 /** Attach the bearer token to fetch headers when one is configured. */
-export const authHeaders = (h: Record<string, string> = {}): Record<string, string> =>
-  TOKEN ? { ...h, authorization: `Bearer ${TOKEN}` } : h;
+export const authHeaders = (h: Record<string, string> = {}): Record<string, string> => {
+  // Attach the browser pseudonym only to mutating JSON requests. Adding a
+  // custom header to every cross-origin GET would preflight the whole polling
+  // dashboard; reads need no decision provenance.
+  const client = Object.keys(h).some((k) => k.toLowerCase() === "content-type")
+    ? clientIdentityHeaders()
+    : {};
+  return TOKEN
+    ? { ...h, ...client, authorization: `Bearer ${TOKEN}` }
+    : { ...h, ...client };
+};
 
 /** Append ?token= to URLs a browser can't put a header on: WS upgrades and the
  *  download navigations (export links). */
