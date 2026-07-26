@@ -13,6 +13,9 @@ type DesktopBridge = {
   setZoom: (factor: number) => Promise<number>;
   autostartEnabled: () => Promise<boolean>;
   setAutostart: (on: boolean) => Promise<boolean>;
+  remoteEnabled?: () => Promise<boolean>;
+  setRemote?: (on: boolean) => Promise<boolean>;
+  revokeRemote?: () => Promise<boolean>;
 };
 
 function bridge(): DesktopBridge | null {
@@ -110,6 +113,62 @@ export async function setWindowZoom(factor: number): Promise<number | null> {
   if (!b) return null;
   try {
     return await b.setZoom(factor);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether the shell is holding the sidecar open to the network.
+ *
+ * Null when the question does not apply — a browser tab, or a shell built
+ * before this existed. The panel renders the manual recipe in that case rather
+ * than a toggle that would do nothing: only the process that spawns the server
+ * can change what it is bound to.
+ */
+export async function remoteAccessEnabled(): Promise<boolean | null> {
+  const b = bridge();
+  if (!b?.remoteEnabled) return null;
+  try {
+    return await b.remoteEnabled();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Open or close the door, and wait for it to actually be open or closed.
+ *
+ * This restarts the sidecar (a socket's bind cannot change under it) and then
+ * reloads the window, so the promise resolving is the last thing this code sees
+ * — treat it as fire-and-forget. Null when the shell cannot do it.
+ */
+export async function setRemoteAccess(on: boolean): Promise<boolean | null> {
+  const b = bridge();
+  if (!b?.setRemote) return null;
+  try {
+    return await b.setRemote(on);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Invalidate every link handed out so far and mint a new one.
+ *
+ * The toggle cannot do this on its own: turning remote access off shuts the
+ * port, but a phone that scanned the code still holds a working key for the
+ * next time it goes on. Rotating the secret is the only revoke that reaches
+ * devices you no longer have.
+ *
+ * False when the shell declines — a token pinned in the environment is not the
+ * app's to rotate. Null when there is no shell to ask.
+ */
+export async function revokeRemoteAccess(): Promise<boolean | null> {
+  const b = bridge();
+  if (!b?.revokeRemote) return null;
+  try {
+    return await b.revokeRemote();
   } catch {
     return null;
   }
