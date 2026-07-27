@@ -355,6 +355,19 @@
   100% { transform: scale(2.4); opacity: 0; }
 }
 
+/* One quiet scan for Argus: motion means watching, not alarm. */
+@keyframes argus-eye-watch {
+  0%, 18%, 100% { transform: translateX(-1.8px); }
+  42%, 62% { transform: translateX(1.8px); }
+  78% { transform: translateX(0); }
+}
+.argus-eye-watch {
+  animation: argus-eye-watch 3.8s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .argus-eye-watch { animation: none; }
+}
+
 /* Keyboard focus.
  *
  * The app leans on `outline-none` for its own styling, which also removed the

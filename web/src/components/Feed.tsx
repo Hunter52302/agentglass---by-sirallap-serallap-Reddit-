@@ -4,7 +4,7 @@ import type { WatchEvent } from "../../../shared/types.ts";
 import { Panel } from "./Panel.tsx";
 import { Portal } from "./Portal.tsx";
 import { friendly, detail, DOT_COLOR } from "../lib/labels.ts";
-import { fmtTime, fmtMs, fmtUsd, agentKey, hashColor } from "../lib/format.ts";
+import { fmtTime, fmtMs, fmtUsd, agentKey, displayAgentKey, displaySourceApp, hashColor } from "../lib/format.ts";
 
 type Category = "all" | "tools" | "chat" | "alerts";
 
@@ -98,6 +98,7 @@ function EventRowInner({ row, onSelect, compact }: { row: Row; onSelect?: (e: Wa
   const f = running ? { verb: "Running", color: "#a78bfa", dot: "run" as const } : friendly(e);
   const d = detail(e);
   const aKey = agentKey(e);
+  const visibleKey = displayAgentKey(e);
   const aColor = hashColor(aKey);
   return (
     <motion.div
@@ -128,7 +129,7 @@ function EventRowInner({ row, onSelect, compact }: { row: Row; onSelect?: (e: Wa
       {e.duration_ms != null && <span className="t-dim2 shrink-0">{fmtMs(e.duration_ms)}</span>}
       {e.cost_usd > 0 && <span className="shrink-0" style={{ color: "var(--success)" }}>{fmtUsd(e.cost_usd)}</span>}
       {/* in a lane the column header already names the agent — the per-row tag is noise there */}
-      {!compact && <span className="ml-auto shrink-0 truncate max-w-[120px]" style={{ color: `color-mix(in srgb, ${aColor} 75%, var(--text4))` }} title={aKey}>{aKey}</span>}
+      {!compact && <span className="ml-auto shrink-0 truncate max-w-[120px]" style={{ color: `color-mix(in srgb, ${aColor} 75%, var(--text4))` }} title={aKey}>{visibleKey}</span>}
     </motion.div>
   );
 }
@@ -300,7 +301,7 @@ function FeedInner({ events, filter, sessionProvider, onSelect, onClearFilter }:
       <span className="font-semibold">Filtered</span>
       {filter.app && (
         <span className="chip" style={{ color: "var(--primary-hover)", background: "color-mix(in srgb, var(--primary) 22%, transparent)", borderColor: "color-mix(in srgb, var(--primary) 55%, transparent)" }}>
-          App: {filter.app}
+          App: {displaySourceApp(filter.app)}
         </span>
       )}
       {filter.type && (

@@ -3,7 +3,7 @@ import { motion } from "motion/react";
 import type { ConnState } from "../lib/useLive.ts";
 import { IS_DEMO, reauthPrompt } from "../lib/api.ts";
 import { subscribeUpdate, updateState, updateAvailable } from "../lib/updateStore.ts";
-import { MOD_KEY } from "../lib/format.ts";
+import { MOD_KEY, displaySourceApp } from "../lib/format.ts";
 import { IS_MAC_DESKTOP } from "../lib/desktop.ts";
 import { ThemeSwitcher } from "./ThemeSwitcher.tsx";
 import { UsageWidget } from "./UsageWidget.tsx";
@@ -134,13 +134,27 @@ export function Header({
 
   return (
     <header className="flex items-center gap-x-3 gap-y-2 px-3 sm:px-4 py-2.5 shrink-0 relative z-20 flex-wrap sm:flex-nowrap"
-      style={{ borderBottom: "1px solid color-mix(in srgb, var(--border) 40%, transparent)", background: "color-mix(in srgb, var(--bg2) 94%, var(--bg))", paddingLeft: IS_MAC_DESKTOP ? 76 : undefined }}>
+      style={{ borderBottom: "1px solid color-mix(in srgb, var(--border) 40%, transparent)", background: "color-mix(in srgb, var(--bg2) 94%, var(--bg))", paddingLeft: IS_MAC_DESKTOP ? 116 : undefined }}>
       <div className="flex items-center gap-2.5 shrink-0">
         <motion.span initial={{ rotate: -20, opacity: 0 }} animate={{ rotate: 0, opacity: 1 }} transition={{ type: "spring", stiffness: 200 }} className="flex pointer-events-none">
-          <Logo size={26} title="agentglass" />
+          <Logo size={26} title="Glasses for Argus" />
         </motion.span>
-        <div className="leading-none pointer-events-none">
-          <div className="text-[16px] font-bold tracking-tight" style={{ color: "var(--text)" }}>agent<span style={{ color: "var(--primary)" }}>glass</span></div>
+        <div className="leading-tight shrink-0">
+          <div className="text-[15px] font-bold tracking-tight" style={{ color: "var(--text)" }}>
+            <span style={{ color: "var(--primary)" }}>Glasses</span> for Argus
+          </div>
+          <div className="text-[8px] tracking-wide" style={{ color: "var(--text4)" }}>
+            agentglass by{" "}
+            <a
+              href="https://github.com/SirAllap"
+              target="_blank"
+              rel="noreferrer"
+              className="hover:underline"
+              style={{ color: "var(--primary-hover)" }}
+            >
+              SirAllap
+            </a>
+          </div>
         </div>
         {/* The project defines what every other number on screen means, so it
             reads as a control in its own right rather than a caption under the
@@ -202,7 +216,7 @@ export function Header({
           control that already applies, offering a list of one. It earns its
           place only in the whole-machine view. */}
       {!workspace && (
-        <Select value={filter.app} style={selStyle} options={[{ value: "", label: "All apps" }, ...apps.map((a) => ({ value: a, label: a }))]} onChange={(v) => onFilter({ ...filter, app: v })} />
+        <Select value={filter.app} style={selStyle} options={[{ value: "", label: "All apps" }, ...apps.map((a) => ({ value: a, label: displaySourceApp(a) }))]} onChange={(v) => onFilter({ ...filter, app: v })} />
       )}
       <Select value={filter.type} style={selStyle} options={[{ value: "", label: "All events" }, ...types.map((t) => ({ value: t, label: t }))]} onChange={(v) => onFilter({ ...filter, type: v })} />
       {/* Provider is auto-detected from each session's model. With one provider

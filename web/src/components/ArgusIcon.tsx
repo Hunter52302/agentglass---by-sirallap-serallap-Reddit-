@@ -6,7 +6,7 @@
 // be got past. Kept deliberately unlike agentglass's loupe: that mark is a lens
 // you point at your fleet, this one is something already watching the machine.
 
-export function ArgusEyeIcon({ size = 15 }: { size?: number }) {
+export function ArgusEyeIcon({ size = 15, animated = false }: { size?: number; animated?: boolean }) {
   return (
     <svg
       viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}
@@ -14,7 +14,10 @@ export function ArgusEyeIcon({ size = 15 }: { size?: number }) {
       role="img" aria-label="Argus"
     >
       <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6z" />
-      <circle cx="12" cy="12" r="2.6" />
+      <g className={animated ? "argus-eye-watch" : undefined}>
+        <circle cx="12" cy="12" r="2.6" />
+        <circle cx="12" cy="12" r="0.8" fill="var(--success)" stroke="none" />
+      </g>
     </svg>
   );
 }

@@ -18,17 +18,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ViewHeader } from "./workspace/ViewHeader.tsx";
 import { usePoll } from "../lib/usePoll.ts";
 import { api } from "../lib/api.ts";
+import { displaySourceApp } from "../lib/format.ts";
 import type { FsMap, MapNode, MapAgent } from "../../../shared/env.ts";
 import { MapGraph, type MapOrientation } from "./MapGraph.tsx";
 
 /** Which renderer. Persisted, because it is a lasting preference about how you
  *  read this — not a per-visit choice. */
 type MapMode = "map" | "tree";
-const MODE_KEY = "glasses.map.mode";
+// Reset the persisted renderer once: Nodes is the intended first-run view.
+// Users can still choose Tree and that choice persists under this key.
+const MODE_KEY = "glasses.map.mode.v2";
 const ORIENTATION_KEY = "glasses.map.orientation";
-// The old key was written as "1" before the user made a choice, so a new key
-// is needed to make live follow genuinely opt-in on existing installations.
-const FOLLOW_KEY = "glasses.map.follow.v2";
 
 /** A tree — the filesystem as a place. */
 export function MapIcon({ size = 15 }: { size?: number }) {
@@ -142,7 +142,7 @@ function AgentLegend({
             className="flex items-center gap-2 text-[11px] w-full text-left px-1 py-0.5 rounded transition-colors"
             style={{ background: on ? "color-mix(in srgb, var(--primary) 13%, transparent)" : "transparent" }}>
             <span className="w-2 h-2 rounded-full shrink-0" style={{ background: colorOf(a.session_id) }} />
-            <span className="font-medium shrink-0" style={{ color: "var(--text2)" }}>{a.source_app}</span>
+            <span className="font-medium shrink-0" style={{ color: "var(--text2)" }}>{displaySourceApp(a.source_app)}</span>
             <span className="text-[9px] shrink-0 tabular-nums" style={{ color: "var(--text4)" }}>
               {a.pid == null ? "PID —" : `PID ${a.pid}`}
             </span>
@@ -247,13 +247,12 @@ export function MapView({ active }: { active: boolean }) {
     try { return localStorage.getItem(ORIENTATION_KEY) === "top-down" ? "top-down" : "left-right"; }
     catch { return "left-right"; }
   });
-  const [following, setFollowing] = useState(() => {
-    try { return localStorage.getItem(FOLLOW_KEY) === "1"; } catch { return false; }
-  });
+  // This control moves and zooms the camera. It is intentionally session-only
+  // so reopening AgentGlass can never surprise the user with automatic motion.
+  const [following, setFollowing] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   useEffect(() => { try { localStorage.setItem(MODE_KEY, mode); } catch { /* private mode */ } }, [mode]);
   useEffect(() => { try { localStorage.setItem(ORIENTATION_KEY, orientation); } catch { /* private mode */ } }, [orientation]);
-  useEffect(() => { try { localStorage.setItem(FOLLOW_KEY, following ? "1" : "0"); } catch { /* private mode */ } }, [following]);
 
   // Reveal is the one action on this panel, so its failures are surfaced
   // inline rather than only in the console — a right-click that silently does
@@ -310,7 +309,9 @@ export function MapView({ active }: { active: boolean }) {
   const followedAgent = useMemo(() => {
     const agents = map?.agents ?? [];
     const selected = trailFor ? agents.find((agent) => agent.session_id === trailFor) : null;
-    return selected ?? [...agents].sort((a, b) => b.last_ts - a.last_ts)[0] ?? null;
+    return selected ?? [...agents].sort((a, b) =>
+      Number(b.live) - Number(a.live) || b.last_ts - a.last_ts
+    )[0] ?? null;
   }, [map?.agents, trailFor]);
 
   useEffect(() => {
@@ -339,7 +340,7 @@ export function MapView({ active }: { active: boolean }) {
                     color: mode === m ? "var(--primary-hover)" : "var(--text4)",
                     background: mode === m ? "color-mix(in srgb, var(--primary) 16%, transparent)" : "transparent",
                   }}>
-                  {m}
+                  {m === "map" ? "nodes" : "tree"}
                 </button>
               ))}
             </span>

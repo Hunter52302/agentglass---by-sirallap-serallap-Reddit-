@@ -1,11 +1,11 @@
 {
-  "name": "agentglass-electron",
+  "name": "glasses-for-argus-electron",
   "private": true,
   "version": "0.5.0",
-  "description": "agentglass desktop shell (Electron)",
+  "description": "Glasses for Argus desktop shell (Electron)",
   "author": "SirAllap",
-  "homepage": "https://github.com/SirAllap/agentglass",
-  "repository": { "type": "git", "url": "https://github.com/SirAllap/agentglass.git" },
+  "homepage": "https://github.com/git-Clem/Glasses-for-Argus",
+  "repository": { "type": "git", "url": "https://github.com/git-Clem/Glasses-for-Argus.git" },
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -18,10 +18,10 @@
     "electron-builder": "^25.1.8"
   },
   "build": {
-    "appId": "app.agentglass.desktop",
-    "productName": "agentglass",
-    "executableName": "agentglass",
-    "artifactName": "agentglass_${version}_${arch}.${ext}",
+    "appId": "dev.git-clem.glasses-for-argus",
+    "productName": "Glasses for Argus",
+    "executableName": "glasses-for-argus",
+    "artifactName": "Glasses-for-Argus_${version}_${arch}.${ext}",
     "directories": { "output": "dist-app" },
     "files": ["main.js", "preload.js", "icons/**"],
     "extraResources": [
@@ -30,7 +30,7 @@
       { "from": "../hooks", "to": "hooks", "filter": ["**/*", "!__pycache__", "!__pycache__/**", "!*.pyc"] }
     ],
     "publish": [
-      { "provider": "github", "owner": "SirAllap", "repo": "agentglass" }
+      { "provider": "github", "owner": "git-Clem", "repo": "Glasses-for-Argus" }
     ],
     "linux": {
       "target": ["AppImage", "deb"],

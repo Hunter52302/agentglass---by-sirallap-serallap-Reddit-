@@ -55,6 +55,8 @@ export interface MapAgent {
   source_app: string;
   /** Volunteered by the reporting hook; never inferred from proximity. */
   pid: number | null;
+  /** Recent and not ended according to the canonical session row. */
+  live: boolean;
   /** Most recently touched path — the agent's position on the tree. */
   current: string | null;
   /** Tool that produced the current position. */
@@ -84,6 +86,8 @@ interface Touch {
   tool: string;
   ts: number;
 }
+
+const SESSION_LIVE_MS = 120_000;
 
 export function compareMapNodes(a: MapNode, b: MapNode): number {
   return a.kind !== b.kind
@@ -118,9 +122,15 @@ export function buildMap({
   /** Explicit null is useful for whole-machine callers and isolated tests. */
   scope?: string | null;
 } = {}): FsMap {
-  // `undefined` means use the cockpit's live workspace; explicit null means
-  // whole-machine. Keep that distinction for both halves of the map.
-  const activeScope = scopeRoot === undefined ? workspaceRoot() : scopeRoot;
+  // `undefined` means use the operator's filesystem lens, falling back to the
+  // cockpit workspace when no lens has been chosen. The path shown beside
+  // "watching" must scope both layers; otherwise current disk writes and old
+  // labeled sessions from another project appear on one misleading map.
+  // Explicit null remains the whole-machine escape hatch for callers/tests.
+  const tierStatus = envTierStatus();
+  const activeScope = scopeRoot === undefined
+    ? tierStatus.file.dir ?? workspaceRoot()
+    : scopeRoot;
   const scope = scopeClause(activeScope);
   const activeRoots = activeScope ? scopeRoots(activeScope) : [];
 
@@ -144,6 +154,10 @@ export function buildMap({
   for (const r of rows) {
     const p = normalizePath(String(r.file_path));
     if (!p) continue;
+    // The SQL scope follows the session's recorded project/cwd. Guard the
+    // actual touched path too: a session can read or edit outside its cwd, and
+    // that path does not belong on a map whose lens is elsewhere.
+    if (activeRoots.length && !activeRoots.some((root) => isUnderPath(p, root))) continue;
     touches.push({
       path: p,
       session_id: r.session_id,
@@ -307,6 +321,28 @@ export function buildMap({
   const truncated = out.length > nodeCap;
 
   // ── agents, positioned ───────────────────────────────────────────────────
+  const liveBySession = new Map<string, boolean>();
+  const sessionIds = [...new Set(touches.map((touch) => touch.session_id))];
+  if (sessionIds.length) {
+    const placeholders = sessionIds.map(() => "?").join(",");
+    const sessionRows = db.query(`
+      SELECT session_id, ended_at, last_seen
+        FROM sessions
+       WHERE session_id IN (${placeholders})
+    `).all(...sessionIds) as Array<{
+      session_id: string;
+      ended_at: number | null;
+      last_seen: number;
+    }>;
+    const now = Date.now();
+    for (const row of sessionRows) {
+      liveBySession.set(
+        row.session_id,
+        row.ended_at == null && now - row.last_seen < SESSION_LIVE_MS,
+      );
+    }
+  }
+
   const pidBySession = new Map<string, number>();
   try {
     const pidRows = db.query(`
@@ -338,6 +374,7 @@ export function buildMap({
         session_id: t.session_id,
         source_app: t.source_app,
         pid: pidBySession.get(t.session_id) ?? null,
+        live: liveBySession.get(t.session_id) ?? false,
         current: null,
         current_tool: null,
         trail: [],
@@ -362,7 +399,7 @@ export function buildMap({
     agents: [...agentMap.values()].sort((a, b) => b.last_ts - a.last_ts),
     truncated,
     total_nodes: out.length,
-    fs_tier_enabled: envTierStatus().file.enabled,
+    fs_tier_enabled: tierStatus.file.enabled,
     unclaimed_total: unclaimedTotal,
   };
 }

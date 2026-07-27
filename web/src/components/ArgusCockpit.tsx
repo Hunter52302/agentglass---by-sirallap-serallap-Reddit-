@@ -36,6 +36,8 @@ import { usePoll } from "../lib/usePoll.ts";
 import { api } from "../lib/api.ts";
 import { MapView } from "./MapPanel.tsx";
 import { PathAutocomplete } from "./PathAutocomplete.tsx";
+import { ArgusEyeIcon } from "./ArgusIcon.tsx";
+import { IS_MAC_DESKTOP } from "../lib/desktop.ts";
 import type {
   EnvEvent, EnvTierStatus, EnvSummary, ActorLane, SuspectRollup,
   RedlineStatus, KillableGate, ReplayBounds, ReplayState, PtyShell,
@@ -143,6 +145,7 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
   const [surface, setSurface] = useState<"activity" | "map">("activity");
   const [lanesCollapsed, setLanesCollapsed] = useState(false);
   const dirRef = useRef<HTMLInputElement>(null);
+  const dirDirty = useRef(false);
   const [redlines, setRedlines] = useState<RedlineStatus | null>(null);
   const [held, setHeld] = useState<PendingGate[]>([]);
   const [killable, setKillable] = useState<KillableGate[]>([]);
@@ -157,7 +160,10 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
   const [redlineEditorOpen, setRedlineEditorOpen] = useState(false);
 
   const refresh = useCallback(() => {
-    api.envStatus().then(setStatus).catch(() => {});
+    api.envStatus().then((next) => {
+      setStatus(next);
+      if (!dirDirty.current) setDirDraft(next.file.dir || "");
+    }).catch(() => {});
     api.envSummary().then(setSummary).catch(() => {});
     api.envSuspect().then(setSuspect).catch(() => {});
     api.envRedlines().then(setRedlines).catch(() => {});
@@ -224,7 +230,10 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
       const result = await api.envSetWatch({ enabled: true, dir: dirDraft.trim() });
       setStatus(result.status);
       if (!result.ok) setWatchError(result.error || "That folder cannot be watched");
-      else setDirDraft(result.status.file.dir || dirDraft.trim());
+      else {
+        dirDirty.current = false;
+        setDirDraft(result.status.file.dir || dirDraft.trim());
+      }
       refresh();
     } finally { setBusy(false); }
   };
@@ -277,14 +286,32 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
         {/* ── header: the lens, and the controls that move it ── */}
         <div
           className="flex items-center gap-x-3 gap-y-2 px-3 sm:px-5 py-2 shrink-0 border-b flex-wrap"
-          style={{ minHeight: 52, borderColor: "color-mix(in srgb, var(--border) 40%, transparent)" }}
+          style={{
+            minHeight: 52,
+            borderColor: "color-mix(in srgb, var(--border) 40%, transparent)",
+            paddingLeft: IS_MAC_DESKTOP ? 116 : undefined,
+          }}
         >
-          <span className="text-[15px] font-bold tracking-tight shrink-0" style={{ color: "var(--text)" }}>
-            Argus
+          <span className="flex shrink-0" style={{ color: "var(--primary)" }}>
+            <ArgusEyeIcon size={24} animated />
           </span>
-          <span className="text-[10px] shrink-0" style={{ color: "var(--text4)" }}>
-            what the machine shows
-          </span>
+          <div className="leading-tight shrink-0">
+            <div className="text-[15px] font-bold tracking-tight" style={{ color: "var(--text)" }}>
+              Argus
+            </div>
+            <div className="text-[8px] tracking-wide" style={{ color: "var(--text4)" }}>
+              by{" "}
+              <a
+                href="https://github.com/git-Clem"
+                target="_blank"
+                rel="noreferrer"
+                className="hover:underline"
+                style={{ color: "var(--primary-hover)" }}
+              >
+                git-Clem
+              </a>
+            </div>
+          </div>
 
           <div className="flex items-center gap-2 sm:ml-4 flex-wrap">
             <Toggle
@@ -321,12 +348,21 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
                 </button>
               ))}
             </span>
-            <span className="text-[10px] shrink-0" style={{ color: "var(--text4)" }}>watching</span>
+            <span
+              className="text-[10px] shrink-0"
+              style={{ color: dirDirty.current ? "var(--warning)" : "var(--text4)" }}
+              title={dirDirty.current ? `Currently watching ${status?.file.dir || "nothing"}` : undefined}
+            >
+              {dirDirty.current ? "new lens" : "watching"}
+            </span>
             <div className="relative flex-1 min-w-[180px] xl:w-[300px] xl:flex-none">
               <PathAutocomplete
                 inputRef={dirRef}
                 value={dirDraft}
-                onChange={setDirDraft}
+                onChange={(value) => {
+                  dirDirty.current = true;
+                  setDirDraft(value);
+                }}
                 onSubmit={() => void applyDir()}
                 placeholder={status?.file.dir || "/Users/you/project"}
               />

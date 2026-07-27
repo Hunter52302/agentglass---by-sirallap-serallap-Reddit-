@@ -1,8 +1,10 @@
 <div align="center">
 
-<img src=".github/assets/logo.svg" alt="agentglass" width="88" height="88" />
+<img src=".github/assets/logo.svg" alt="Glasses for Argus" width="88" height="88" />
 
-# agentglass
+# Glasses for Argus
+
+**[agentglass](https://github.com/SirAllap/agentglass) by [SirAllap](https://github.com/SirAllap) · Argus by [git-Clem](https://github.com/git-Clem)**
 
 **A loupe for your agents** — a real-time Mission-Control **dashboard _and_ workspace** for AI coding agents, across every provider and every project on your machine.
 

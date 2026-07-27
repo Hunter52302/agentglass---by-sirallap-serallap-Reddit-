@@ -9,7 +9,7 @@
       },
     },
     "electron": {
-      "name": "agentglass-electron",
+      "name": "glasses-for-argus-electron",
       "version": "0.5.0",
       "devDependencies": {
         "electron": "^33.2.0",
@@ -17,7 +17,7 @@
       },
     },
     "server": {
-      "name": "agentglass-server",
+      "name": "glasses-for-argus-server",
       "version": "0.2.0",
       "dependencies": {
         "@anthropic-ai/sdk": "^0.112.1",
@@ -27,7 +27,7 @@
       },
     },
     "web": {
-      "name": "agentglass-web",
+      "name": "glasses-for-argus-web",
       "version": "0.2.0",
       "dependencies": {
         "@number-flow/react": "^0.6.1",
@@ -356,12 +356,6 @@
     "abbrev": ["abbrev@1.1.1", "", {}, "sha512-nne9/IiQ/hzIhY6pdDnbBtz7DjPTKrY00P/zvPSm5pOFkl6xuGrGnXn/VtTNNfNtAfZ9/1RtehkszU9qcTii0Q=="],
 
     "agent-base": ["agent-base@7.1.4", "", {}, "sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ=="],
-
-    "agentglass-electron": ["agentglass-electron@workspace:electron"],
-
-    "agentglass-server": ["agentglass-server@workspace:server"],
-
-    "agentglass-web": ["agentglass-web@workspace:web"],
 
     "agentkeepalive": ["agentkeepalive@4.6.0", "", { "dependencies": { "humanize-ms": "^1.2.1" } }, "sha512-kja8j7PjmncONqaTsB8fQ+wE2mSU2DJ9D4XKoJ5PFWIdRMa6SLSN1ff4mOr4jCbfRSsxR4keIiySJU0N9T5hIQ=="],
 
@@ -694,6 +688,12 @@
     "get-proto": ["get-proto@1.0.1", "", { "dependencies": { "dunder-proto": "^1.0.1", "es-object-atoms": "^1.0.0" } }, "sha512-sTSfBjoXBp89JvIKIefqw7U2CCebsc74kiY6awiGogKtoSGbgjYE/G/+l9sF3MWFPNc9IcoOC4ODfKHfxFmp0g=="],
 
     "get-stream": ["get-stream@5.2.0", "", { "dependencies": { "pump": "^3.0.0" } }, "sha512-nBF+F1rAZVCu/p7rjzgA+Yb4lfYXrpl7a6VmJrU8wF9I1CKvP/QwPNZHnOlwbTkY6dvtFIzFMSyQXbLoTQPRpA=="],
+
+    "glasses-for-argus-electron": ["glasses-for-argus-electron@workspace:electron"],
+
+    "glasses-for-argus-server": ["glasses-for-argus-server@workspace:server"],
+
+    "glasses-for-argus-web": ["glasses-for-argus-web@workspace:web"],
 
     "glob": ["glob@10.5.0", "", { "dependencies": { "foreground-child": "^3.1.0", "jackspeak": "^3.1.2", "minimatch": "^9.0.4", "minipass": "^7.1.2", "package-json-from-dist": "^1.0.0", "path-scurry": "^1.11.1" }, "bin": { "glob": "dist/esm/bin.mjs" } }, "sha512-DfXN8DfhJ7NH3Oe7cFmu3NCu1wKbkReJ8TorzSAFbSKrlNaQSKfIzqYqVY8zlbs2NLBbWpRiU52GX2PbaBVNkg=="],
 

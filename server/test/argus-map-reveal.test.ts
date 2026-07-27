@@ -7,7 +7,7 @@ const dir = mkdtempSync(join(tmpdir(), "agx-map-reveal-"));
 process.env.AGENTGLASS_DB = join(dir, "map.db");
 process.env.XDG_CONFIG_HOME = dir;
 
-const { db } = await import("../src/db.ts");
+const { db, insertEvent } = await import("../src/db.ts");
 const { insertEnvEvent, noteAgentPid } = await import("../src/argus/store.ts");
 const { isKnownPath } = await import("../src/argus/reveal.ts");
 const { buildMap, compareMapNodes } = await import("../src/argus/map.ts");
@@ -87,9 +87,38 @@ describe("map layout", () => {
     const agent = buildMap({ scope: null }).agents.find((item) => item.session_id === session);
     expect(agent).toMatchObject({
       pid: 43210,
+      live: false,
       current_tool: "Edit",
       current: "/tmp/map-pid/file.ts",
     });
+  });
+
+  test("only calls a recent, unended session live", () => {
+    db.run("DELETE FROM events");
+    db.run("DELETE FROM sessions");
+    const now = Date.now();
+    const add = (session: string, endedAt: number | null, lastSeen: number) => {
+      db.run(
+        `INSERT INTO sessions (
+          session_id, source_app, started_at, ended_at, last_seen
+        ) VALUES (?, 'map-test', ?, ?, ?)`,
+        [session, lastSeen - 1_000, endedAt, lastSeen],
+      );
+      db.run(
+        `INSERT INTO events (
+          source_app, session_id, hook_event_type, tool_name, payload, timestamp
+        ) VALUES ('map-test', ?, 'PostToolUse', 'Edit', ?, ?)`,
+        [session, JSON.stringify({ tool_input: { file_path: `/tmp/map-live/${session}.ts` } }), lastSeen],
+      );
+    };
+    add("live-session", null, now);
+    add("ended-session", now - 1_000, now);
+    add("stale-session", null, now - 180_000);
+
+    const agents = buildMap({ scope: null }).agents;
+    expect(agents.find((agent) => agent.session_id === "live-session")?.live).toBe(true);
+    expect(agents.find((agent) => agent.session_id === "ended-session")?.live).toBe(false);
+    expect(agents.find((agent) => agent.session_id === "stale-session")?.live).toBe(false);
   });
 
   test("keeps a hierarchy when whole-machine paths form a forest", () => {
@@ -127,5 +156,47 @@ describe("map layout", () => {
     expect(map.nodes.some((node) => node.path === join(active, "src", "current.ts"))).toBe(true);
     expect(map.nodes.some((node) => node.path.startsWith(retired))).toBe(false);
     expect(map.unclaimed_total).toBe(1);
+  });
+
+  test("uses the filesystem lens for labeled activity too", async () => {
+    db.run("DELETE FROM events");
+    db.run("DELETE FROM env_events");
+    const active = join(dir, "lens-active");
+    const elsewhere = join(dir, "lens-elsewhere");
+    mkdirSync(active, { recursive: true });
+    mkdirSync(elsewhere, { recursive: true });
+    const insertTouch = (session: string, project: string, file: string) => {
+      insertEvent({
+        source_app: "map-test",
+        session_id: session,
+        hook_event_type: "PostToolUse",
+        tool_name: "Edit",
+        tool_use_id: null,
+        agent_id: null,
+        agent_type: null,
+        model_name: null,
+        is_error: 0,
+        error_text: null,
+        usage: {},
+        usage_is_cumulative: false,
+        cost_cumulative: null,
+        summary: null,
+        timestamp: Date.now(),
+        payload: {
+          project_path: project,
+          cwd: project,
+          tool_input: { file_path: file },
+        },
+        chat: null,
+      });
+    };
+    insertTouch("inside-lens", active, join(active, "src", "current.ts"));
+    insertTouch("outside-lens", elsewhere, join(elsewhere, "src", "old.ts"));
+
+    await setFsWatch({ enabled: true, dir: active });
+    const map = buildMap({ nodeCap: 100 });
+    expect(map.agents.map((agent) => agent.session_id)).toEqual(["inside-lens"]);
+    expect(map.nodes.some((node) => node.path.startsWith(elsewhere))).toBe(false);
+    await setFsWatch({ enabled: false });
   });
 });

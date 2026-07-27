@@ -49,6 +49,20 @@ export const fmtTime = (ts: number) =>
 export const agentKey = (e: { source_app: string; session_id: string }) =>
   `${e.source_app}:${e.session_id}`;
 
+/** Keep telemetry keys stable while giving this renamed local fork a human
+ *  label. Old sessions retain the truthful original source_app in storage. */
+export function displaySourceApp(app: string): string {
+  const normalized = app.trim().toLowerCase();
+  if (
+    normalized === "agentglass---by-sirallap-serallap-reddit-"
+    || normalized === "glasses-for-argus"
+  ) return "Glasses for Argus";
+  return app;
+}
+
+export const displayAgentKey = (e: { source_app: string; session_id: string }) =>
+  `${displaySourceApp(e.source_app)}:${e.session_id}`;
+
 /**
  * What to call a session on screen.
  *
@@ -69,7 +83,7 @@ export const sessionTitle = (
 ): string => {
   const t = (s.custom_title || s.ai_title || "").trim();
   if (t) return t.length > max ? t.slice(0, max - 1) + "…" : t;
-  return s.source_app ? `${s.source_app}:${s.session_id.slice(0, 8)}` : s.session_id.slice(0, 8);
+  return s.source_app ? `${displaySourceApp(s.source_app)}:${s.session_id.slice(0, 8)}` : s.session_id.slice(0, 8);
 };
 
 // Deterministic color from a string (agent lanes, model chips).

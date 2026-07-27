@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from "motion/react";
 import type { AgentCard, AgentOutcome } from "../lib/derive.ts";
 import type { ImpactBreakdownRow, ImpactSummary } from "../../../shared/impact.ts";
 import { Panel } from "./Panel.tsx";
-import { fmtUsd, fmtTokens, fmtAgo, modelLabelOf } from "../lib/format.ts";
+import { displaySourceApp, fmtUsd, fmtTokens, fmtAgo, modelLabelOf } from "../lib/format.ts";
 import { displayHasWater, formatWaterInline } from "../lib/impact.ts";
 
 // "now ago" reads wrong — fmtAgo already returns "now" for the freshest events.
@@ -233,7 +233,7 @@ export function Fleet({ agents, impact, activeApp, onSelect }: {
       right={
         activeApp ? (
           <span className="chip" style={{ color: "var(--primary-hover)", background: "color-mix(in srgb, var(--primary) 20%, transparent)", borderColor: "color-mix(in srgb, var(--primary) 55%, transparent)" }}>
-            Filtering: {activeApp}
+            Filtering: {displaySourceApp(activeApp)}
           </span>
         ) : (
           <span className="text-[10px] t-dim2">{agents.length} live · {groups.length} projects</span>
@@ -253,7 +253,7 @@ export function Fleet({ agents, impact, activeApp, onSelect }: {
                 style={{ color: activeApp === app ? "var(--primary-hover)" : "var(--text2)" }}
               >
                 <span className="text-[10px] t-dim2 transition-transform" style={{ transform: collapsed ? "rotate(-90deg)" : "none" }}>▾</span>
-                <span className="text-[11px] font-semibold tracking-wide uppercase" style={{ letterSpacing: "0.06em" }}>{app}</span>
+                <span className="text-[11px] font-semibold tracking-wide uppercase" style={{ letterSpacing: "0.06em" }}>{displaySourceApp(app)}</span>
                 {live > 0 && <span className="h-1.5 w-1.5 rounded-full" style={{ background: "var(--success)", boxShadow: "0 0 6px var(--success)" }} />}
                 <span className="ml-auto flex items-center gap-2 text-[9.5px] t-dim2 tabular-nums">
                   {subs > 0 && <span style={{ color: "var(--info)" }}>⑃{subs}</span>}

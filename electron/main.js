@@ -466,7 +466,7 @@ function createWindow() {
     width: 1440,
     height: 900,
     backgroundColor: "#0f0a1a",
-    title: "agentglass",
+    title: "Glasses for Argus",
     autoHideMenuBar: true,
     icon: path.join(__dirname, "icons", "icon.png"),
     webPreferences: { preload: path.join(__dirname, "preload.js") },

@@ -131,6 +131,8 @@ export interface MapAgent {
   source_app: string;
   /** PID volunteered by this session's hook. */
   pid: number | null;
+  /** Recent and not ended according to the session record. */
+  live: boolean;
   current: string | null;
   current_tool: string | null;
   trail: string[];

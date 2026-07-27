@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
 import { Panel } from "./Panel.tsx";
-import { fmtUsd, fmtTokens } from "../lib/format.ts";
+import { displaySourceApp, fmtUsd, fmtTokens } from "../lib/format.ts";
 import type { AgentCard, AgentStatus } from "../lib/derive.ts";
 
 const STATUS_COLOR: Record<string, string> = {
@@ -284,7 +284,7 @@ function Dossier({ b, wide, auto }: {
 }) {
   const a = b.a;
   const toCompact = b.frac == null ? null : Math.round(Math.min(1, b.frac / COMPACT_FRAC) * 100);
-  const name = a.title || a.source_app;
+  const name = a.title || displaySourceApp(a.source_app);
   const hot = toCompact != null && toCompact >= 75;
 
   const status = (

@@ -1494,7 +1494,12 @@ const server = Bun.serve<WsData>({
     // The filesystem map: agentglass's labeled tool calls and Argus's unclaimed
     // writes on one tree. Both halves, which neither side has alone.
     if (pathname === "/env/map") {
-      return json(buildMap({ limit: Math.min(2000, Number(url.searchParams.get("limit")) || 600) }));
+      const limit = Math.min(2000, Number(url.searchParams.get("limit")) || 600);
+      // The client asks for the number of nodes it is prepared to draw. Using
+      // a smaller hidden cap clipped the followed agent's current node while
+      // still returning that agent, leaving the canvas blank when Follow tried
+      // to focus a position that was not present.
+      return json(buildMap({ limit, nodeCap: limit }));
     }
     if (pathname === "/env/recent") {
       const tier = url.searchParams.get("tier");

@@ -21,6 +21,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FsMap, MapNode, MapAgent } from "../../../shared/env.ts";
+import { displaySourceApp } from "../lib/format.ts";
 
 export interface LaidNode extends MapNode {
   x: number;
@@ -29,6 +30,9 @@ export interface LaidNode extends MapNode {
 }
 
 export type MapOrientation = "left-right" | "top-down";
+
+export const activityLabel = (agent: Pick<MapAgent, "live">): string =>
+  agent.live ? "Live activity" : "Last recorded activity";
 export interface MapCameraView { x: number; y: number; k: number }
 
 const COL_W = 190; // horizontal distance per depth level
@@ -46,6 +50,27 @@ export function activityFocusView(
     // Leave a little room on the right for the live activity card.
     x: viewport.width * 0.44 - node.x * k,
     y: viewport.height * 0.5 - node.y * k,
+    k,
+  };
+}
+
+/** Frame a complete node layout inside the current viewport. */
+export function fitMapView(
+  content: { width: number; height: number },
+  viewport: { width: number; height: number },
+): MapCameraView | null {
+  if (
+    content.width <= 0 || content.height <= 0
+    || viewport.width <= 0 || viewport.height <= 0
+  ) return null;
+  const k = Math.max(
+    0.08,
+    Math.min(1.1, Math.min(viewport.width / content.width, viewport.height / content.height) * 0.95),
+  );
+  const fits = content.height * k <= viewport.height;
+  return {
+    x: 24,
+    y: fits ? (viewport.height - content.height * k) / 2 : 16,
     k,
   };
 }
@@ -211,32 +236,38 @@ export function MapGraph({
 
   useEffect(() => () => stopCamera(), [stopCamera]);
 
-  const doFit = useCallback(() => {
+  const doFit = useCallback((): boolean => {
     const el = wrapRef.current;
-    if (!el || !map.nodes.length) return;
+    if (!el || !map.nodes.length) return false;
     const r = el.getBoundingClientRect();
-    if (!r.width || !r.height) return;
-    // Floor low enough that a few hundred nodes actually fit. A tall tree
-    // clamped to a comfortable zoom is worse than a small one: it opens half
-    // off-screen and reads as broken.
-    const k = Math.max(0.08, Math.min(1.1, Math.min(r.width / width, r.height / height) * 0.95));
-    // Centre only when it fits. Otherwise pin to the top — an overflowing tree
-    // centred vertically is clipped at BOTH ends, and the user cannot tell
-    // which way to scroll to find the root.
-    const fits = height * k <= r.height;
+    const target = fitMapView(
+      { width, height },
+      { width: r.width, height: r.height },
+    );
+    if (!target) return false;
     stopCamera();
-    commitView({ x: 24, y: fits ? (r.height - height * k) / 2 : 16, k });
+    commitView(target);
+    return true;
   }, [width, height, map.nodes.length, commitView, stopCamera]);
 
   // Fit once per map shape, not per poll: refitting every 4s would fight the
   // user's own pan and zoom.
-  const shapeKey = `${map.root ?? ""}:${orientation}`;
+  const shapeKey = `${map.root ?? ""}:${map.total_nodes}:${map.nodes[0]?.path ?? ""}:${map.nodes.at(-1)?.path ?? ""}:${orientation}`;
   const fittedFor = useRef<string | null>(null);
   useEffect(() => {
     if (!map.nodes.length) return;
-    if (fittedFor.current === shapeKey) return;
-    fittedFor.current = shapeKey;
-    doFit();
+    const fitWhenReady = () => {
+      if (fittedFor.current === shapeKey) return;
+      // A map can mount while its parent transition still measures 0×0. Do
+      // not mark it fitted until a real viewport exists.
+      if (doFit()) fittedFor.current = shapeKey;
+    };
+    fitWhenReady();
+    const el = wrapRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(fitWhenReady);
+    observer.observe(el);
+    return () => observer.disconnect();
   }, [shapeKey, doFit]);
 
   // Live follow is an activity camera: each genuinely newer tool event gets a
@@ -451,8 +482,9 @@ export function MapGraph({
         >
           <div className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full shrink-0" style={{ background: colorOf(focusAgent.session_id) }} />
-            <span className="text-[10px] uppercase tracking-wide font-semibold" style={{ color: "var(--success)" }}>
-              Live activity
+            <span className="text-[10px] uppercase tracking-wide font-semibold"
+              style={{ color: focusAgent.live ? "var(--success)" : "var(--text3)" }}>
+              {activityLabel(focusAgent)}
             </span>
             <span className="ml-auto text-[9px] tabular-nums" style={{ color: "var(--text4)" }}>
               {focusAgent.pid == null ? "PID unavailable" : `PID ${focusAgent.pid}`}
@@ -460,7 +492,7 @@ export function MapGraph({
           </div>
           <div className="mt-1 text-[12px] font-semibold truncate" style={{ color: "var(--text)" }}
             title={focusAgent.source_app}>
-            {focusAgent.source_app}
+            {displaySourceApp(focusAgent.source_app)}
           </div>
           <div className="mt-0.5 text-[10px] truncate" style={{ color: "var(--text3)" }}
             title={focusAgent.current ?? ""}>
