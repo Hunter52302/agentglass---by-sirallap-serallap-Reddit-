@@ -295,8 +295,8 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
             />
             <Toggle
               on={!!status?.network.all}
-              label={status?.network.all ? "network: all" : "network: AI only"}
-              title="Widen to EVERY process holding a socket — this is what names firefox, steam, Drive. Narrow to AI-relevant only to quiet the feed."
+              label={status?.network.all ? "network: OS-visible" : "network: AI only"}
+              title={status?.network.note ?? "Socket visibility is still being measured."}
               onClick={toggleScope}
             />
             <Toggle
@@ -364,6 +364,20 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
             tone={summary?.runtimes_blind ? "var(--warning)" : "var(--text)"} />
           <Stat label="actors" value={lanes.length} />
           <Stat label="connections" value={summary?.connections_open ?? "—"} tone="var(--info)" />
+          <span
+            className="text-[10px] px-2 py-1 rounded"
+            style={{
+              color: status?.network.visibility === "unavailable" || status?.network.visibility === "limited"
+                ? "var(--warning)"
+                : "var(--text4)",
+              background: "color-mix(in srgb, var(--warning) 8%, transparent)",
+            }}
+            title={status?.network.note ?? "Socket visibility is still being measured."}
+          >
+            network: {status?.network.visibility === "os_visible"
+              ? "OS-visible"
+              : status?.network.visibility ?? "probing"}
+          </span>
           <Stat label="writer unknown" value={suspect?.unattributed_writes ?? 0}
             tone={suspect?.unattributed_writes ? "var(--warning)" : "var(--text)"} />
           <Stat label="distinct paths" value={suspect?.unattributed_paths ?? 0} />
@@ -419,7 +433,7 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
           )}
         </div>
 
-        {/* ── held gates: the control plane, with the escalation ── */}
+        {/* Held AgentGlass gates. Argus adds one redline-only kill control. */}
         {held.length > 0 && (
           <div className="px-5 py-2.5 shrink-0 border-b"
             style={{
@@ -431,7 +445,9 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
                 ⏸ held — waiting on you
               </span>
               <span className="text-[10px]" style={{ color: "var(--text4)" }}>
-                {killable.length} of {held.length} can also be stopped outright
+                {killable.length > 0
+                  ? `${killable.length} redline-matched request${killable.length === 1 ? "" : "s"} can be stopped`
+                  : "no held request matched a killable redline"}
               </span>
             </div>
             <div className="flex flex-col gap-1.5">
@@ -440,7 +456,7 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
                 return (
                   <div key={g.id} className="flex items-center gap-2 text-[11px]">
                     <span className="font-medium shrink-0" style={{ color: "var(--text2)" }}>{g.tool_name}</span>
-                    {k?.rule && (
+                    {k && (
                       <span className="text-[9px] px-1.5 py-0.5 rounded shrink-0"
                         style={{ background: "color-mix(in srgb, var(--error) 16%, transparent)", color: "var(--error)" }}
                         title={k.rule.description}>
@@ -462,18 +478,18 @@ export function ArgusCockpit({ open, onClose }: { open: boolean; onClose: () => 
                         style={{ color: "var(--warning)", background: "color-mix(in srgb, var(--warning) 14%, transparent)" }}>
                         deny
                       </button>
-                      {/* The escalation agentglass's gate cannot perform. Denial
-                          refuses ONE call; this stops the actor. Irreversible,
-                          so it confirms, and it only appears when the hook told
-                          us a pid — otherwise there is nothing to stop. */}
-                      <button
-                        onClick={() => { if (k) void confirmKill(g.id, k.pid); }}
-                        disabled={busy || !k}
-                        title={k ? `Stops pid ${k.pid} and its children` : "This request carries no pid — nothing to kill"}
-                        className="px-2 py-0.5 rounded text-[10px] transition-opacity hover:opacity-80 disabled:opacity-30"
-                        style={{ color: "var(--error)", background: "color-mix(in srgb, var(--error) 16%, transparent)" }}>
-                        deny &amp; kill
-                      </button>
+                      {/* Argus's sole intervention appears only when a user-owned
+                          redline matched and the held request supplied a PID. */}
+                      {k && (
+                        <button
+                          onClick={() => void confirmKill(g.id, k.pid)}
+                          disabled={busy}
+                          title={`Stops redline-matched pid ${k.pid} and its children`}
+                          className="px-2 py-0.5 rounded text-[10px] transition-opacity hover:opacity-80 disabled:opacity-30"
+                          style={{ color: "var(--error)", background: "color-mix(in srgb, var(--error) 16%, transparent)" }}>
+                          deny &amp; kill
+                        </button>
+                      )}
                     </span>
                   </div>
                 );

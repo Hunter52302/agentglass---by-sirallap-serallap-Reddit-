@@ -496,7 +496,7 @@ const realApi = {
 const DEMO_ENV_STATUS: EnvTierStatus = {
   enabled: false,
   process: { enabled: false, poll_ms: 0, cmdline: false },
-  network: { enabled: false, poll_ms: 0, all: false },
+  network: { enabled: false, poll_ms: 0, all: false, visibility: "unavailable", note: "Demo mode does not inspect host sockets." },
   file: { enabled: false, available: false, dir: null },
   platform: "demo",
 };

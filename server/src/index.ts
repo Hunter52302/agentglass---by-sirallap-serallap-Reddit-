@@ -76,7 +76,7 @@ import { buildMap } from "./argus/map.ts";
 import { revealPath, REVEAL_ENABLED } from "./argus/reveal.ts";
 import {
   evaluate as evaluateRedline, noteGate, gateExtra, killGate, killableGates,
-  redlineStatus, reloadRedlines, upsertRedline, deleteRedline, killTree,
+  redlineStatus, reloadRedlines, upsertRedline, deleteRedline,
 } from "./argus/redlines.ts";
 import { startScanner, ownsSession, knownProjects, resyncScope, SCAN_ENABLED } from "./transcripts.ts";
 import { workspaceRoot, setWorkspaceRoot, inScope, CONFIG_PATH } from "./config.ts";
@@ -717,32 +717,18 @@ const server = Bun.serve<WsData>({
 
       // AgentGlass Argus integration — server-side redlines, evaluated BEFORE the gate.
       //
-      // Additive only: a rule can escalate a call to an immediate deny+kill, or
-      // tag it as it goes into agentglass's gate. It can never allow something
-      // the gate would otherwise have held, so a project already using /gate
-      // keeps its exact behaviour.
+      // A rule may tag a call as it enters agentglass's existing gate. Matching
+      // never kills automatically. The operator owns Argus's sole intervention.
       const gateId = typeof b.id === "string" ? b.id : undefined;
       const proposedPid = Number(b.pid);
       const rule = evaluateRedline({ action: String(b.tool_name || ""), target: summary });
       if (gateId) {
         noteGate(gateId, {
           pid: Number.isInteger(proposedPid) && proposedPid > 1 ? proposedPid : null,
-          rule: rule ? { id: rule.id, description: rule.description, decision: rule.decision, kill: rule.kill } : null,
+          rule: rule ? { id: rule.id, description: rule.description, decision: rule.decision } : null,
           created: Date.now(),
         });
       }
-      if (rule?.kill) {
-        // The rule opted into stopping the actor outright. No human wait — that
-        // is the entire point of `"kill": true`, and it is why it is opt-in.
-        const killed = killTree(Number.isInteger(proposedPid) ? proposedPid : null);
-        console.error(`[argus/redlines] kill-on-match "${rule.id}" → ${JSON.stringify(killed)}`);
-        return json({
-          decision: "deny",
-          reason: `Argus redline "${rule.id}" (${rule.description}) — denied and process stopped`,
-          killed,
-        });
-      }
-
       const decision = await submitGate(
         // The hook picks the id so it can re-attach to this exact request after
         // a dropped connection (see /gate/status). Shape-checked in gate.ts;
@@ -1256,10 +1242,8 @@ const server = Bun.serve<WsData>({
       return json({ ok: true, status: setNetworkScope(!!b.all) });
     }
 
-    // Redlines: the policy layer agentglass's gate has no notion of, plus the
-    // escalation it cannot perform. `deny & kill` refuses the action AND stops
-    // the process tree — a denial alone leaves a runaway free to try the next
-    // thing. Irreversible, so it is always an explicit click or an opt-in rule.
+    // Redlines label operator-owned boundaries. `deny & kill` is Argus's sole
+    // direct OS intervention and exists only for a redline-matched held request.
     if (pathname === "/env/redlines") return json(redlineStatus());
     if (pathname === "/env/redlines/reload" && req.method === "POST") {
       if (!localOrigin(req)) return csrfBlocked();
@@ -1292,6 +1276,9 @@ const server = Bun.serve<WsData>({
       const id = String(b.id || "");
       const extra = gateExtra(id);
       if (!extra) return json({ ok: false, error: "unknown or already-resolved gate" }, 404);
+      if (!extra.rule) {
+        return json({ ok: false, error: "this request did not match a redline — Argus cannot kill it" }, 400);
+      }
       if (extra.pid == null) {
         return json({ ok: false, error: "this request carries no pid — nothing to kill" }, 400);
       }

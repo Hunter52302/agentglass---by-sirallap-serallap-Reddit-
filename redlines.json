@@ -15,7 +15,7 @@
     "kind": "command",
     "action": "^bash$",
     "target": "(curl|wget)[^|]*\\|\\s*(ba|z|)sh",
-    "decision": "kill"
+    "decision": "gate"
   },
   {
     "id": "ssh-keys",

@@ -4,7 +4,7 @@ import { useDialogs } from "./ConfirmDialog.tsx";
 import { api } from "../lib/api.ts";
 import type { RedlineRuleInfo, RedlineRuleInput, RedlineStatus } from "../../../shared/env.ts";
 
-type Decision = "flag" | "gate" | "kill";
+type Decision = "flag" | "gate";
 type Kind = "command" | "file" | "path" | "any";
 type Operation = "create" | "write" | "delete";
 
@@ -42,7 +42,7 @@ function asDraft(rule: RedlineRuleInfo): Draft {
     target: rule.target ?? "",
     protected_path: rule.protected_path ?? "",
     operations: rule.operations ?? ["create", "write", "delete"],
-    decision: rule.decision ?? (rule.kill ? "kill" : "gate"),
+    decision: rule.decision ?? "gate",
   };
 }
 
@@ -164,7 +164,7 @@ export function RedlineEditor({ open, onClose, onSaved }: {
             <div>
               <div className="text-sm font-semibold" style={{ color: "var(--text)" }}>Argus redlines</div>
               <div className="text-[10px]" style={{ color: "var(--text4)" }}>
-                User-owned command, path, and file-operation policies. Kill applies only when Argus has a verified PID.
+                User-owned command, path, and file-operation policies. Kill requires a matched redline and agent-associated PID.
               </div>
             </div>
             <button onClick={onClose} className="ml-auto px-2 py-1 rounded text-xs" style={{ color: "var(--text3)" }}>close</button>
@@ -182,7 +182,7 @@ export function RedlineEditor({ open, onClose, onSaved }: {
                         <div className="text-xs font-semibold" style={{ color: "var(--text)" }}>{rule.id}</div>
                         <div className="text-[11px] mt-0.5" style={{ color: "var(--text3)" }}>{rule.description}</div>
                       </div>
-                      <span className="ml-auto text-[9px] uppercase px-1.5 py-0.5 rounded" style={{ color: rule.decision === "kill" ? "var(--error)" : rule.decision === "gate" ? "var(--warning)" : "var(--info)", background: "var(--bg2)" }}>{rule.decision}</span>
+                      <span className="ml-auto text-[9px] uppercase px-1.5 py-0.5 rounded" style={{ color: rule.decision === "gate" ? "var(--warning)" : "var(--info)", background: "var(--bg2)" }}>{rule.decision}</span>
                     </div>
                     <div className="mt-2 text-[10px] font-mono break-all" style={{ color: "var(--text4)" }}>
                       {rule.protected_path ? `path: ${rule.protected_path}` : null}
@@ -221,7 +221,7 @@ export function RedlineEditor({ open, onClose, onSaved }: {
                 <div>
                   <label className="block text-[10px] mb-1" style={{ color: "var(--text4)" }}>Decision</label>
                   <select value={draft.decision} onChange={(e) => setDraft({ ...draft, decision: e.target.value as Decision })} className="w-full px-2 py-1.5 rounded border text-xs" style={{ background: "var(--bg2)", borderColor: "var(--border)", color: "var(--text)" }}>
-                    <option value="flag">flag only</option><option value="gate">gate / deny</option><option value="kill">deny and kill</option>
+                    <option value="flag">flag only</option><option value="gate">AgentGlass review</option>
                   </select>
                 </div>
               </div>

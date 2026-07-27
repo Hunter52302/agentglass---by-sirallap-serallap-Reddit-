@@ -33,7 +33,7 @@ export interface ArgusEvent {
   action: string;
   target: string | null;
   /** `redline` means the observation matched operator policy. It does not imply
-   * the actor was identified or successfully contained. */
+   * the actor was identified or eligible for the operator's kill control. */
   status: "start" | "ok" | "error" | "awaiting_approval" | "redline";
   payload: Record<string, any>;
 }
@@ -43,10 +43,10 @@ export interface AdapterCtx {
 }
 
 /**
- * Every capture source implements this and nothing more: start producing
- * events, stop producing them. `ctx.emit` is the adapter's ONLY output, which
- * is what lets a new sensor (an eBPF probe, an Endpoint Security extension, a
- * remote host) be added without the core knowing anything about it.
+ * Every passive capture source implements this and nothing more: start
+ * producing metadata events, stop producing them. `ctx.emit` is the adapter's
+ * ONLY output. This interface is not a placeholder for privileged enforcement
+ * sensors; those are outside Argus's identity boundary.
  */
 export interface Adapter {
   name: string;

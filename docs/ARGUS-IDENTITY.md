@@ -1,69 +1,114 @@
 # Argus identity boundary
 
-Argus has one primary identity, one supporting capability, and one explicitly
-operator-controlled diagnostic mode.
+Argus has exactly two identities. They are exhaustive, not milestones toward a
+third identity.
 
-## Primary: agent runtime integrity and intervention
+## Identity 1: passive runtime truth
 
-Argus shows what agents, their shells, and their process trees actually do beneath
-AgentGlass's semantic reports. It may observe recognized agent runtimes, attached
-PTY/shell sessions, spawned processes, project filesystem effects, and relevant
-network metadata. When an agent-associated task crosses an explicit redline,
-Argus may deny the action, stop the task, or stop its process tree.
+Argus passively reports what the operating system exposes about recognized agent
+runtimes, their process trees, attached shells, relevant network metadata, and
+opt-in filesystem effects.
 
-Containment is not general host administration. A target must be tied to an agent,
-a descendant, an explicitly attached shell, a gated request carrying a PID, or a
-manual operator decision made from Argus evidence.
+Observations retain their real limits:
 
-## Supporting: development provenance
+- process presence does not reveal prompts, tool calls, output, or intent;
+- socket metadata does not reveal packet contents, browser tabs, or purpose;
+- a filesystem event without a writer PID remains `writer unknown`;
+- temporal proximity is context, never proof of causation;
+- restricted or failed sensors remain visibly `limited` or `unavailable`.
 
-Argus correlates declared agent actions with actual project effects from agents,
-editors, build tools, package managers, Git, tests, shells, and unattributed
-writers. Temporal proximity is evidence for review, not proof of causation.
-Environment observations remain separate from AgentGlass semantic telemetry.
+Argus does not gain privileges to erase these limits. Honest uncertainty is part
+of its identity.
 
-## Operator-expanded diagnostic mode
+### Single intervention exception: redline kill
 
-The user owns the lens. Argus therefore permits deliberate expansion beyond the
-active workspace:
+Argus has one direct operating-system intervention: stop an agent-associated
+process tree that matched an operator-owned redline.
 
-- `network: all` may show every process represented in the socket table;
-- the filesystem watcher may be pointed at a parent directory, drive root, or `/`;
+The exception is narrow:
+
+1. a proposed action must match a loaded redline;
+2. the request must carry a valid actor PID;
+3. the PID must be tied to that held request;
+4. the operator must explicitly click `deny & kill`;
+5. PID 0/1, Argus itself, and Argus's parent remain unkillable.
+
+An ordinary held gate is not killable merely because it carries a PID. Argus has
+no arbitrary PID-kill surface and no autonomous response to unrelated activity.
+AgentGlass's existing gate continues to own ordinary approval and denial.
+Redline matching never kills automatically.
+
+## Identity 2: declared-vs-observed development provenance
+
+Argus keeps agent declarations beside machine observations without collapsing
+them:
+
+- AgentGlass reports which agent declared a tool action or file touch.
+- Argus reports which path, process, socket, or attached shell the machine
+  exposed.
+- A declaration plus a nearby observation is corroboration, not proof that one
+  caused the other.
+- An observation with no declaration remains visible and unattributed.
+- Environment observations remain separate from sessions, tokens, costs,
+  prompts, and tool-call statistics.
+
+The declared-vs-observed gap is a product result, not a defect to hide through
+guessed attribution.
+
+## Operator-expanded lens is a mode, not another identity
+
+The user may deliberately widen passive observation:
+
+- network scope may include every process represented in the readable socket
+  table;
+- filesystem scope may be a parent directory, drive root, or `/`;
 - an existing local, SSH, WSL, PuTTY/plink, or other terminal may be explicitly
   attached to the shell recorder.
 
-These modes are never the default. The UI must label them as machine-wide or
-operator-expanded, and observations must not be presented as agent-attributed
-merely because they occurred near an agent session.
+Expansion changes scope, not authority. It does not add privileges, enforcement,
+content capture, or agent attribution. The UI must label it machine-wide or
+operator-expanded.
 
-## Deferred: persistent endpoint-security platform
+## Outside Argus permanently
 
-The following remain outside the current foundation:
+A privileged watchdog, sandbox, endpoint agent, antivirus, EDR, or host
+enforcement platform is a different project and program. It is not a deferred
+Argus identity, optional Argus mode, future Argus tier, or roadmap destination.
 
-- boot, kernel, driver, firmware, registry-persistence, service, or scheduled-task
-  monitoring;
-- packet contents, TLS interception, keylogging, screen capture, clipboard capture,
-  or arbitrary personal-file contents;
-- automatic malware classification of unrelated software;
-- tamper-proof, antivirus, EDR, or complete-host-protection claims;
-- autonomous termination of unrelated processes without an explicit policy or
-  operator decision.
+Argus must not add bridge work toward that product, including:
 
-## Invariants
+- kernel, driver, minifilter, eBPF, Endpoint Security, or packet-filter
+  components;
+- boot, service, daemon, registry, scheduled-task, or persistence monitoring;
+- process sandboxing, filesystem access control, secret brokering, network
+  filtering, proxying, or TLS interception;
+- packet contents, keylogging, screen capture, clipboard capture, or arbitrary
+  personal-file contents;
+- malware classification, tamper-proofing, antivirus, EDR, or complete-host
+  protection claims;
+- autonomous termination of unrelated processes.
 
-1. Agent events and environment observations use separate storage and wire types.
-2. Filesystem observation is off by default.
-3. AI/agent-relevant network metadata is the normal view; every-process network
-   visibility is an explicit opt-in.
-4. Broader filesystem scope requires the operator to choose the path deliberately.
-5. Unattributed means unknown, not malicious.
-6. PTY/shell recording requires explicit attachment or agent ownership.
-7. Process containment requires agent association, a gated PID, an attached shell,
-   an explicit redline, or direct operator confirmation.
-8. Argus refuses PID 0/1, itself, and its parent.
-9. AgentGlass continues to function when Argus is disabled or unavailable.
-10. Weak observations retain fidelity labels and are never converted into fake
-    sessions, costs, prompts, or tool calls.
+If a proposal needs any capability above, it belongs in another product. Argus
+does not accept a partial foundation for it.
+
+## Hard invariants
+
+1. Argus has only Identity 1 and Identity 2.
+2. Observation is passive, metadata-only, and honest about missing capability.
+3. Filesystem observation is off by default and never reads file contents.
+4. AI/agent-relevant network metadata is the default; broader readable scope is
+   explicit opt-in.
+5. Unattributed means unknown, not suspicious or malicious.
+6. Agent events and environment observations use separate storage and wire types.
+7. Weak observations never become fake sessions, costs, prompts, or tool calls.
+8. PTY/shell recording requires explicit attachment or agent ownership.
+9. The only direct OS intervention is killing a redline-matched,
+   agent-associated process tree after an explicit operator action.
+10. Non-redlined gates and unrelated processes are never killable through Argus.
+11. Argus continues to function when any passive sensor is unavailable.
+12. No privileged-watchdog capability may be introduced as scaffolding,
+    abstraction, adapter placeholder, or future-facing extension point.
+13. Redline matching never triggers autonomous termination.
 
 ## Actor labels
 
@@ -85,12 +130,13 @@ address headers from an unspecified proxy.
 
 Use:
 
-> Argus reveals and contains activity beneath agent self-report, while keeping
-> broader machine visibility under the user's explicit control.
+> Argus passively reveals runtime truth beneath agent self-report, preserves the
+> gap between declared and observed activity, and can stop only an
+> agent-associated process that crossed an operator-owned redline.
 
 Do not use:
 
-> Argus detects all malicious activity.
+> Argus is becoming an endpoint-security or host-enforcement platform.
 
 or:
 

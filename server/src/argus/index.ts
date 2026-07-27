@@ -1,4 +1,4 @@
-// AgentGlass Argus integration — agent runtime integrity, provenance, and intervention.
+// AgentGlass Argus integration — passive runtime truth and provenance.
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md for provenance.
 //
@@ -98,7 +98,13 @@ export interface EnvTierHandle {
 export interface EnvTierStatus {
   enabled: boolean;
   process: { enabled: boolean; poll_ms: number; cmdline: boolean };
-  network: { enabled: boolean; poll_ms: number; all: boolean };
+  network: {
+    enabled: boolean;
+    poll_ms: number;
+    all: boolean;
+    visibility: "probing" | "os_visible" | "limited" | "unavailable";
+    note: string | null;
+  };
   file: { enabled: boolean; available: boolean; dir: string | null };
   platform: string;
 }
@@ -106,7 +112,13 @@ export interface EnvTierStatus {
 let status: EnvTierStatus = {
   enabled: false,
   process: { enabled: false, poll_ms: PROCESS_POLL_MS, cmdline: INCLUDE_CMDLINE },
-  network: { enabled: false, poll_ms: NETWORK_POLL_MS, all: NETWORK_ALL },
+  network: {
+    enabled: false,
+    poll_ms: NETWORK_POLL_MS,
+    all: NETWORK_ALL,
+    visibility: "probing",
+    note: null,
+  },
   file: { enabled: false, available: false, dir: null },
   platform: process.platform,
 };
@@ -167,14 +179,9 @@ function startFsWatcher(dir: string): void {
       status: redline ? "redline" : "ok",
       payload: {
         path: change.path,
-        diff: change.diff,
         fidelity: "fs_observed",
         scope: isArgusWorkspacePath(dir) ? "workspace" : "operator_expanded",
         redline: redline?.rule ?? null,
-        containment_available: redline?.containment_available ?? false,
-        containment_note: redline && !redline.containment_available
-          ? "filesystem watcher identified the path but not the writer pid"
-          : null,
       },
     });
   }, { exclude: selfPaths() });
@@ -251,7 +258,14 @@ export function startEnvTier({ onEvent, fsDir, retentionDays = 0 }: StartEnvTier
   }
 
   if (NETWORK_SCAN) {
-    netAdapter = new NetworkAdapter({ pollMs: NETWORK_POLL_MS, all: NETWORK_ALL });
+    netAdapter = new NetworkAdapter({
+      pollMs: NETWORK_POLL_MS,
+      all: NETWORK_ALL,
+      onVisibility: (visibility, note) => {
+        status.network.visibility = visibility;
+        status.network.note = note;
+      },
+    });
     void netAdapter.start(ctx);
     adapters.push(netAdapter);
     status.network.enabled = true;
