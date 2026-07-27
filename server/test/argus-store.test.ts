@@ -49,6 +49,49 @@ beforeAll(() => {
   db.run("DELETE FROM env_events");
 });
 
+describe("filesystem detail privacy", () => {
+  test("persists counts but never diff samples or content fields", () => {
+    db.run("DELETE FROM env_events");
+    const stored = store.insertEnvEvent(envRow({
+      tier: "file",
+      action: "fs_write",
+      target: "/repo/.env",
+      path: "/repo/.env",
+      fidelity: "fs_observed",
+      detail: {
+        diff: { plus: 1, minus: 1, start_line: 2, sample: ["- TOKEN=old-secret", "+ TOKEN=new-secret"] },
+        content: "TOKEN=new-secret",
+        scope: "workspace",
+      },
+    }));
+    expect(stored.detail).toEqual({
+      diff: { plus: 1, minus: 1, start_line: 2 },
+      scope: "workspace",
+    });
+    expect(JSON.stringify(stored)).not.toContain("secret");
+  });
+
+  test("scrubs content-bearing details from legacy file rows", () => {
+    db.run("DELETE FROM env_events");
+    const inserted = db.prepare(`
+      INSERT INTO env_events (
+        ts, tier, action, target, fidelity, attributed, detail
+      ) VALUES (?, 'file', 'fs_write', ?, 'fs_observed', 0, ?)
+    `).run(Date.now(), "/repo/credentials.json", JSON.stringify({
+      diff: { plus: 1, minus: 0, start_line: 1, sample: ["+ password=hunter2"] },
+      content: "password=hunter2",
+      scope: "operator_expanded",
+    }));
+    expect(store.scrubLegacyFileDetails()).toBeGreaterThanOrEqual(1);
+    const row = db.query(`SELECT detail FROM env_events WHERE id = ?`).get(inserted.lastInsertRowid) as { detail: string };
+    expect(JSON.parse(row.detail)).toEqual({
+      diff: { plus: 1, minus: 0, start_line: 1 },
+      scope: "operator_expanded",
+    });
+    expect(row.detail).not.toContain("hunter2");
+  });
+});
+
 describe("currentRuntimes folds lifecycle events", () => {
   test("last event per node decides whether it is running", () => {
     db.run("DELETE FROM env_events");

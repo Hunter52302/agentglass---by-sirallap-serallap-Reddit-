@@ -38,6 +38,10 @@ CREATE INDEX IF NOT EXISTS idx_env_ts ON env_events(ts);
 CREATE INDEX IF NOT EXISTS idx_env_tier_ts ON env_events(tier, ts);
 CREATE INDEX IF NOT EXISTS idx_env_node ON env_events(node_id, ts);
 CREATE INDEX IF NOT EXISTS idx_env_provider_ts ON env_events(provider, ts);
+CREATE TABLE IF NOT EXISTS env_migrations (
+  id TEXT PRIMARY KEY,
+  applied_at INTEGER NOT NULL
+);
 `);
 
 const insertStmt = db.prepare(`
@@ -48,14 +52,75 @@ INSERT INTO env_events (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
+/**
+ * File observations persist metadata, never file contents.
+ *
+ * This allowlist sits at the database boundary so a future watcher or adapter
+ * cannot accidentally reintroduce raw diff lines. Paths remain visible because
+ * provenance needs them; changed contents do not.
+ */
+export function safeFileDetail(detail: Record<string, unknown> | null | undefined): Record<string, unknown> {
+  const source = detail && typeof detail === "object" ? detail : {};
+  const safe: Record<string, unknown> = {};
+  const diff = source.diff;
+  if (diff && typeof diff === "object" && !Array.isArray(diff)) {
+    const d = diff as Record<string, unknown>;
+    const count = (v: unknown) => Number.isInteger(v) && Number(v) >= 0 ? Number(v) : 0;
+    const start = Number.isInteger(d.start_line) && Number(d.start_line) >= 1 ? Number(d.start_line) : 1;
+    safe.diff = { plus: count(d.plus), minus: count(d.minus), start_line: start };
+  } else {
+    safe.diff = null;
+  }
+  for (const key of ["scope", "redline"]) {
+    if (source[key] !== undefined) safe[key] = source[key];
+  }
+  return safe;
+}
+
 export function insertEnvEvent(e: EnvEvent): EnvEvent {
+  const detail = e.tier === "file" ? safeFileDetail(e.detail) : (e.detail ?? {});
   const res = insertStmt.run(
     e.ts, e.tier, e.action, e.target, e.node_id, e.parent_node_id, e.pid, e.ppid,
     e.runtime, e.provider, e.runtime_kind, e.process_name, e.remote_host,
     e.remote_ip, e.remote_port, e.path, e.fidelity, e.attributed,
-    JSON.stringify(e.detail ?? {})
+    JSON.stringify(detail)
   );
-  return { ...e, id: Number(res.lastInsertRowid) };
+  return { ...e, detail, id: Number(res.lastInsertRowid) };
+}
+
+/**
+ * Remove content-bearing filesystem details written by older builds.
+ *
+ * Run once at module load. This repairs existing local databases, not only new
+ * events. Malformed rows become the same empty metadata shape used for new
+ * observations.
+ */
+export function scrubLegacyFileDetails(): number {
+  const rows = db.query(`SELECT id, detail FROM env_events WHERE tier = 'file'`).all() as Array<{
+    id: number;
+    detail: string;
+  }>;
+  const update = db.prepare(`UPDATE env_events SET detail = ? WHERE id = ?`);
+  let changed = 0;
+  for (const row of rows) {
+    let parsed: Record<string, unknown> = {};
+    try {
+      const value = JSON.parse(row.detail || "{}");
+      if (value && typeof value === "object" && !Array.isArray(value)) parsed = value;
+    } catch {}
+    const next = JSON.stringify(safeFileDetail(parsed));
+    if (next === row.detail) continue;
+    update.run(next, row.id);
+    changed++;
+  }
+  return changed;
+}
+
+const FILE_DETAIL_PRIVACY_MIGRATION = "2026-07-file-detail-privacy";
+if (!db.query(`SELECT 1 FROM env_migrations WHERE id = ?`).get(FILE_DETAIL_PRIVACY_MIGRATION)) {
+  scrubLegacyFileDetails();
+  db.prepare(`INSERT OR IGNORE INTO env_migrations (id, applied_at) VALUES (?, ?)`)
+    .run(FILE_DETAIL_PRIVACY_MIGRATION, Date.now());
 }
 
 function hydrate(r: any): EnvEvent {

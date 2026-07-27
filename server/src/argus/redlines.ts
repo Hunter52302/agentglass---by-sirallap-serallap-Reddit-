@@ -2,11 +2,10 @@
 //
 // MIT © 2026 Zac Rieger. See NOTICE.md.
 //
-// Redlines are intentionally operator-owned. Argus provides the matching and
-// containment machinery; the user decides which commands, paths, and file
-// operations cross a line. Rules remain additive to AgentGlass's durable gate:
-// they may hold, deny, or deny-and-kill, but never grant an action the existing
-// gate would otherwise refuse.
+// Redlines are intentionally operator-owned. Argus passively matches commands,
+// paths, and file observations. Its one active tool may stop the
+// agent-associated process tree tied to a matched held request. AgentGlass's
+// durable gate continues to own ordinary approval and denial.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -14,7 +13,7 @@ import { normalizePath, isUnder } from "./paths";
 import { killTree, type KillResult } from "./kill";
 
 export type RedlineKind = "command" | "path" | "file" | "any";
-export type RedlineDecision = "flag" | "gate" | "kill";
+export type RedlineDecision = "flag" | "gate";
 
 export interface RedlineRuleDocument {
   id: string;
@@ -31,9 +30,9 @@ export interface RedlineRuleDocument {
   protected_path?: string | null;
   /** Exemption prefix retained for compatibility with the first redline format. */
   not_target_prefix?: string | null;
-  /** flag = report only; gate = require/force denial; kill = deny and stop tree. */
-  decision?: RedlineDecision;
-  /** Compatibility alias for decision=kill. */
+  /** flag = label; gate = use AgentGlass review. Legacy kill values become gate. */
+  decision?: RedlineDecision | "kill";
+  /** Read-only compatibility input. True becomes decision=gate, never auto-kill. */
   kill?: boolean;
 }
 
@@ -48,7 +47,6 @@ export interface RedlineRule {
   protected_path: string | null;
   not_target_prefix: string | null;
   decision: RedlineDecision;
-  kill: boolean;
   document: RedlineRuleDocument;
 }
 
@@ -56,14 +54,10 @@ export interface RedlineMatch {
   id: string;
   description: string;
   decision: RedlineDecision;
-  kill: boolean;
 }
 
 export interface ObservationRedlineResult {
   rule: RedlineMatch;
-  /** A plain fs.watch event has no writer PID, so kill may be requested but is
-   * not executable until another sensor supplies a verified actor. */
-  containment_available: boolean;
 }
 
 const RULES_FILE =
@@ -82,9 +76,10 @@ function compile(raw: RedlineRuleDocument, watchDir: string | null): RedlineRule
   if (!["command", "path", "file", "any"].includes(kind)) {
     throw new Error(`redline ${id}: kind must be command, path, file, or any`);
   }
-  const decision: RedlineDecision = raw.kill === true ? "kill" : raw.decision ?? "gate";
-  if (!["flag", "gate", "kill"].includes(decision)) {
-    throw new Error(`redline ${id}: decision must be flag, gate, or kill`);
+  const requestedDecision = raw.kill === true ? "kill" : raw.decision;
+  const decision: RedlineDecision = requestedDecision === "kill" ? "gate" : requestedDecision ?? "gate";
+  if (!["flag", "gate"].includes(decision)) {
+    throw new Error(`redline ${id}: decision must be flag or gate`);
   }
   for (const [name, value] of [["action", raw.action], ["target", raw.target], ["protected_path", raw.protected_path], ["not_target_prefix", raw.not_target_prefix]] as const) {
     if (value != null && typeof value !== "string") throw new Error(`redline ${id}: ${name} must be a string`);
@@ -121,7 +116,6 @@ function compile(raw: RedlineRuleDocument, watchDir: string | null): RedlineRule
       ? normalizePath(subst(raw.not_target_prefix)!)
       : null,
     decision,
-    kill: decision === "kill",
     document: { ...raw, id, decision, kill: undefined },
   };
 }
@@ -180,7 +174,6 @@ export function redlineStatus() {
       operations: [...r.operations],
       protected_path: r.protected_path,
       decision: r.decision,
-      kill: r.kill,
     })),
   };
 }
@@ -211,7 +204,7 @@ export function deleteRedline(id: string, watchDir: string | null = currentWatch
 }
 
 function info(r: RedlineRule): RedlineMatch {
-  return { id: r.id, description: r.description, decision: r.decision, kill: r.kill };
+  return { id: r.id, description: r.description, decision: r.decision };
 }
 
 /** Match a proposed agent/tool action. Empty rules match nothing. */
@@ -234,7 +227,6 @@ export function evaluate(proposed: { action: string; target: string }): RedlineR
 export function evaluateFileObservation(event: {
   action: "fs_create" | "fs_write" | "fs_delete";
   path: string;
-  pid?: number | null;
 }): ObservationRedlineResult | null {
   const op = event.action.replace(/^fs_/, "");
   const observed = normalizePath(event.path);
@@ -246,7 +238,7 @@ export function evaluateFileObservation(event: {
     if (r.protected_path && !isUnder(observed, r.protected_path)) continue;
     if (r.target && !r.target.test(observed)) continue;
     if (r.not_target_prefix && isUnder(observed, r.not_target_prefix)) continue;
-    return { rule: info(r), containment_available: Number.isInteger(event.pid) && Number(event.pid) > 1 };
+    return { rule: info(r) };
   }
   return null;
 }
@@ -277,14 +269,23 @@ export function forgetGate(id: string): void {
   extras.delete(id);
 }
 
-export function killableGates(): Array<{ id: string; pid: number; rule: RedlineMatch | null }> {
-  return [...extras.entries()]
-    .filter(([, e]) => e.pid != null)
-    .map(([id, e]) => ({ id, pid: e.pid as number, rule: e.rule }));
+export function killableGates(): Array<{ id: string; pid: number; rule: RedlineMatch }> {
+  return [...extras.entries()].flatMap(([id, e]) =>
+    e.pid != null && e.rule != null ? [{ id, pid: e.pid, rule: e.rule }] : []
+  );
 }
 
 export function killGate(id: string): KillResult {
   const e = extras.get(id);
+  if (!e?.rule) {
+    forgetGate(id);
+    return {
+      requested: e?.pid ?? null,
+      killed: [],
+      failed: [],
+      skipped: "not-redlined",
+    };
+  }
   const res = killTree(e?.pid ?? null);
   forgetGate(id);
   return res;

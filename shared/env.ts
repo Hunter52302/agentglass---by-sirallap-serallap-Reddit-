@@ -202,9 +202,7 @@ export interface RedlineRuleInfo {
   target: string | null;
   operations: Array<"create" | "write" | "delete">;
   protected_path: string | null;
-  decision: "flag" | "gate" | "kill";
-  /** Compatibility projection of decision=kill. */
-  kill: boolean;
+  decision: "flag" | "gate";
 }
 
 export interface RedlineRuleInput {
@@ -229,11 +227,11 @@ export interface RedlineStatus {
   rules: RedlineRuleInfo[];
 }
 
-/** A held gate we know how to stop, because its hook told us its pid. */
+/** A redline-matched held gate with an agent-associated PID. */
 export interface KillableGate {
   id: string;
   pid: number;
-  rule: { id: string; description: string; kill: boolean } | null;
+  rule: { id: string; description: string };
 }
 
 export interface ReplayBounds {
@@ -288,7 +286,13 @@ export interface EnvTick {
 export interface EnvTierStatus {
   enabled: boolean;
   process: { enabled: boolean; poll_ms: number; cmdline: boolean };
-  network: { enabled: boolean; poll_ms: number; all: boolean };
+  network: {
+    enabled: boolean;
+    poll_ms: number;
+    all: boolean;
+    visibility: "probing" | "os_visible" | "limited" | "unavailable";
+    note: string | null;
+  };
   file: { enabled: boolean; available: boolean; dir: string | null };
   platform: string;
 }

@@ -7,10 +7,14 @@ A local, experimental integration of Argus into AgentGlass. See
 ## Identity
 
 AgentGlass explains what agents report: sessions, hooks, OTLP spans, tool calls,
-tokens, cost, and declared edits. Argus is the runtime-integrity and intervention
-layer beneath that report. It exposes recognized agent processes, process trees,
-attached shells and PTYs, relevant network metadata, and opt-in filesystem effects.
-It can deny and contain agent-associated tasks that cross explicit redlines.
+tokens, cost, and declared edits. Argus is the passive runtime-truth layer beneath
+that report. It exposes recognized agent processes, process trees, attached shells
+and PTYs, relevant network metadata, and opt-in filesystem effects.
+
+Argus has one narrow intervention: the operator may stop the agent-associated
+process tree tied to a redline-matched held request. Matching never kills
+automatically. AgentGlass's existing gate continues to own ordinary approval and
+denial. A non-redlined gate is never killable through Argus.
 
 Argus also preserves an operator-expanded diagnostic mode. The user may deliberately
 widen network visibility to every socket-table process or point filesystem observation
@@ -23,24 +27,28 @@ presented as machine-wide observations, not as proof that an agent caused them.
 - Filesystem observation is off by default.
 - Network observation defaults to AI/agent-relevant connections.
 - Whole-network and broad-filesystem modes require an explicit operator choice.
+- Network results are labeled `OS-visible`, `limited`, or `unavailable`. Empty
+  limited/unavailable results never mean another process made no connection.
+- Filesystem observation never reads file contents. Rows persist paths and actions
+  only; startup also strips content-bearing samples written by legacy builds.
 - Unattributed means unknown, not malicious.
 - Shell recording requires explicit attachment or agent ownership.
-- Process containment is limited to agent-associated, gated, redline-matched, attached,
-  or manually confirmed tasks.
+- Process stopping is limited to agent-associated, redline-matched held requests.
 - Argus refuses PID 0/1, itself, and its parent.
-- No boot, driver, registry-persistence, packet-content, keylogging, screen capture,
-  antivirus, EDR, or complete-host-protection claims are made.
+- Privileged watchdog and endpoint-security capabilities are permanently outside
+  Argus, not deferred features or extension points.
 
 ## Main surfaces
 
 - **Argus cockpit:** runtime/process lanes, shell recordings, scoped or expanded file
-  activity, network metadata, redlines, replay, and containment controls.
+  activity, network metadata, redlines, replay, and redline-kill control.
 - **Environment panel:** compact AgentGlass-side view of Argus state.
 - **Map:** declared agent touches and observed filesystem effects remain separate.
 - **Shell recorder:** attaches to an existing local or remote terminal, including SSH,
   WSL, PuTTY/plink-style workflows.
-- **Redlines:** additive policy evaluated before AgentGlass's gate; matching rules may
-  deny or deny-and-stop when explicitly configured.
+- **Redlines:** operator-owned matches evaluated before AgentGlass's gate. The only
+  direct OS action is stopping the matched agent-associated process tree when
+  the operator explicitly clicks the kill control.
 
 ## Configuration defaults
 

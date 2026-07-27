@@ -7,9 +7,9 @@
 
 import { test, expect, describe } from "bun:test";
 import { classifyProcess, redactSecrets, SIGNATURES } from "../src/argus/processes.ts";
-import { classifyEndpoint, parseWindows, parseLsof } from "../src/argus/network.ts";
+import { classifyEndpoint, parseWindows, parseWindowsScan, parseLsof, NetworkAdapter } from "../src/argus/network.ts";
 import { normalizePath, isUnder } from "../src/argus/paths.ts";
-import { lineDiff, makeIgnore } from "../src/argus/watcher.ts";
+import { makeIgnore } from "../src/argus/watcher.ts";
 import { toNative } from "../src/argus/reveal.ts";
 
 describe("process classification", () => {
@@ -119,6 +119,39 @@ describe("socket table parsing", () => {
     expect(parseWindows("   ")).toEqual([]);
   });
 
+  test("windows: reports unreadable owner names as limited visibility", () => {
+    const result = parseWindowsScan(JSON.stringify({
+      conns: [{ pid: 4, name: "", ip: "1.2.3.4", port: 443 }],
+      dns: [],
+      visibility: "limited",
+      missing_owners: 1,
+    }));
+    expect(result.visibility).toBe("limited");
+    expect(result.note).toContain("no readable owning-process name");
+  });
+
+  test("unavailable scans do not fabricate close events", async () => {
+    let scan: any = {
+      connections: [{ pid: 42, name: "claude", ip: "1.2.3.4", port: 443, host: "api.anthropic.com" }],
+      visibility: "os_visible",
+      note: null,
+    };
+    const events: any[] = [];
+    const visibility: string[] = [];
+    const adapter = new NetworkAdapter({
+      pollMs: 0,
+      all: true,
+      scan: async () => scan,
+      onVisibility: (state) => visibility.push(state),
+    });
+    await adapter.start({ emit: (event) => events.push(event) });
+    scan = { connections: [], visibility: "unavailable", note: "denied" };
+    await adapter.pollOnce();
+    expect(events.map((event) => event.action)).toEqual(["net_connect"]);
+    expect(visibility).toEqual(["os_visible", "unavailable"]);
+    adapter.stop();
+  });
+
   test("lsof: parses established TCP rows and ignores the rest", () => {
     const out = [
       "claude 123 zac 14u IPv4 0x1 0t0 TCP 10.0.0.2:52341->160.79.104.10:443 (ESTABLISHED)",
@@ -153,28 +186,6 @@ describe("path normalization", () => {
     expect(isUnder("/c:/repo", "/c:/repo")).toBe(true);
     // "/c:/repo-other" must NOT count as inside "/c:/repo"
     expect(isUnder("/c:/repo-other/a.ts", "/c:/repo")).toBe(false);
-  });
-});
-
-describe("line diff", () => {
-  test("counts added and removed lines around a common prefix/suffix", () => {
-    const d = lineDiff("a\nb\nc", "a\nB\nc");
-    expect(d.plus).toBe(1);
-    expect(d.minus).toBe(1);
-    expect(d.start_line).toBe(2);
-  });
-
-  test("treats an empty original as pure addition", () => {
-    expect(lineDiff("", "x\ny")).toMatchObject({ plus: 2, minus: 0 });
-  });
-
-  test("identical content is a no-op", () => {
-    expect(lineDiff("same", "same")).toMatchObject({ plus: 0, minus: 0 });
-  });
-
-  test("sample is bounded so one huge write cannot blow up an event", () => {
-    const big = Array.from({ length: 5000 }, (_, i) => `line ${i}`).join("\n");
-    expect(lineDiff("", big).sample.length).toBeLessThanOrEqual(80);
   });
 });
 

@@ -1,10 +1,10 @@
-// AgentGlass Argus integration — scoped containment.
+// AgentGlass Argus integration — operator-invoked redline kill.
 //
 // Origin: Argus src/kill.js — MIT © 2026 Zac Rieger. Ported to TypeScript.
 //
-// Argus may stop an agent, an agent descendant, or a process explicitly attached
-// to a recorded shell/gate. This is containment of agent-associated activity,
-// not a general-purpose host process manager.
+// Argus may stop only the agent-associated process tree tied to an
+// operator-owned redline match. This is the sole active intervention in an
+// otherwise passive observer, not a general-purpose host process manager.
 
 import { execFileSync } from "node:child_process";
 
@@ -56,9 +56,9 @@ function killOne(pid: number): boolean {
 /**
  * Stop the process tree rooted at pid.
  *
- * Callers must establish that the pid belongs to an agent, its descendants, an
- * explicitly attached shell, or a gated action. This low-level function also
- * refuses pid 0/1, the Argus process, and Argus's parent.
+ * Callers must establish both that the request matched a redline and that the
+ * PID belongs to the agent-associated held request. This low-level function
+ * also refuses pid 0/1, the Argus process, and Argus's parent.
  */
 export function killTree(pid: number | null | undefined): KillResult {
   const root = Number(pid);

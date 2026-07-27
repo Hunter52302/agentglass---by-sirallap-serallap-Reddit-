@@ -56,20 +56,37 @@ export interface Conn {
 const arr = (v: any): any[] => (Array.isArray(v) ? v : v == null ? [] : [v]);
 
 const WIN_SCRIPT = [
-  '$procs=@{};Get-Process|ForEach-Object{$procs[$_.Id]=$_.ProcessName};',
-  '$conns=Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue|',
+  '$procs=@{};Get-Process -ErrorAction SilentlyContinue|ForEach-Object{$procs[$_.Id]=$_.ProcessName};',
+  '$netError=$null;try{$raw=Get-NetTCPConnection -State Established -ErrorAction Stop}catch{$raw=@();$netError=$_.Exception.Message};',
+  '$conns=$raw|',
   "Where-Object{$_.RemoteAddress -and $_.RemoteAddress -ne '127.0.0.1' -and $_.RemoteAddress -ne '::1' -and $_.RemoteAddress -notlike '0.*' -and $_.RemoteAddress -notlike 'fe80*'}|",
   'ForEach-Object{[pscustomobject]@{pid=$_.OwningProcess;name=$procs[[int]$_.OwningProcess];ip=[string]$_.RemoteAddress;port=$_.RemotePort}};',
   '$dns=Get-DnsClientCache -ErrorAction SilentlyContinue|Where-Object{$_.Data -and ($_.Type -eq 1 -or $_.Type -eq 28)}|ForEach-Object{[pscustomobject]@{n=$_.Entry;d=[string]$_.Data}};',
-  '[pscustomobject]@{conns=@($conns);dns=@($dns)}|ConvertTo-Json -Depth 4 -Compress',
+  '$missing=@($conns|Where-Object{-not $_.name}).Count;',
+  "$visibility=if($netError){'unavailable'}elseif($missing -gt 0){'limited'}else{'os_visible'};",
+  '[pscustomobject]@{conns=@($conns);dns=@($dns);visibility=$visibility;error=$netError;missing_owners=$missing}|ConvertTo-Json -Depth 4 -Compress',
 ].join('');
 
-export function parseWindows(text: string): Conn[] {
-  if (!text || !text.trim()) return [];
+export type NetworkVisibility = "probing" | "os_visible" | "limited" | "unavailable";
+
+export interface NetworkScanResult {
+  connections: Conn[];
+  visibility: NetworkVisibility;
+  note: string | null;
+}
+
+export function parseWindowsScan(text: string): NetworkScanResult {
+  if (!text || !text.trim()) {
+    return {
+      connections: [],
+      visibility: "unavailable",
+      note: "Windows socket query returned no capability result.",
+    };
+  }
   const obj = JSON.parse(text);
   const ipToHost = new Map<string, string>();
   for (const d of arr(obj.dns)) if (d && d.d) ipToHost.set(String(d.d), String(d.n));
-  return arr(obj.conns)
+  const connections = arr(obj.conns)
     .filter(Boolean)
     .map((c: any) => ({
       pid: Number(c.pid),
@@ -78,6 +95,21 @@ export function parseWindows(text: string): Conn[] {
       port: Number(c.port),
       host: ipToHost.get(String(c.ip)) || null,
     }));
+  const visibility: NetworkVisibility =
+    obj.visibility === "unavailable" ? "unavailable"
+      : obj.visibility === "limited" ? "limited"
+        : "os_visible";
+  const missing = Number(obj.missing_owners) || connections.filter((c) => !c.name).length;
+  const note = visibility === "unavailable"
+    ? "Windows denied or could not run its socket-table query. No connections are inferred from an empty result."
+    : missing > 0
+      ? `${missing} OS-visible connection${missing === 1 ? "" : "s"} had no readable owning-process name.`
+      : "Shows sockets exposed by Windows to this account. Protected processes may still be absent.";
+  return { connections, visibility, note };
+}
+
+export function parseWindows(text: string): Conn[] {
+  return parseWindowsScan(text).connections;
 }
 
 /** macOS/Linux: lsof gives name+pid+remote; hosts stay numeric (best-effort). */
@@ -90,20 +122,41 @@ export function parseLsof(text: string): Conn[] {
   return out;
 }
 
-async function defaultScan(): Promise<Conn[]> {
+async function defaultScan(): Promise<NetworkScanResult> {
   if (process.platform === 'win32') {
-    const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-Command', WIN_SCRIPT], {
-      maxBuffer: 8 * 1024 * 1024,
-    });
-    return parseWindows(stdout);
+    try {
+      const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-Command', WIN_SCRIPT], {
+        maxBuffer: 8 * 1024 * 1024,
+      });
+      return parseWindowsScan(stdout);
+    } catch {
+      return {
+        connections: [],
+        visibility: "unavailable",
+        note: "Windows socket-table query failed. No connections are inferred from an empty result.",
+      };
+    }
   }
   try {
     const { stdout } = await execFileAsync('lsof', ['-nP', '-iTCP', '-sTCP:ESTABLISHED'], {
       maxBuffer: 8 * 1024 * 1024,
     });
-    return parseLsof(stdout);
-  } catch {
-    return []; // an ss-based Linux fallback can be added as its own adapter
+    const connections = parseLsof(stdout);
+    return {
+      connections,
+      visibility: connections.length ? "os_visible" : "limited",
+      note: connections.length
+        ? "Shows sockets exposed by lsof to this account. Other users or protected processes may be absent."
+        : "No readable socket rows. No-connection and permission-limited states cannot be distinguished without elevated access.",
+    };
+  } catch (e: any) {
+    return {
+      connections: [],
+      visibility: e?.code === "ENOENT" ? "unavailable" : "limited",
+      note: e?.code === "ENOENT"
+        ? "lsof is unavailable, so this platform has no socket-table reader."
+        : "Socket query returned no readable rows. Hidden processes are not reported as having no connections.",
+    };
   }
   // WSL is the one place this reliably returns nothing, and it is not worth a
   // fallback: WSL2 virtualizes networking through the Windows host, so the
@@ -124,14 +177,16 @@ export interface Relevance {
 export interface NetworkAdapterOpts {
   pollMs?: number;
   all?: boolean;
-  scan?: () => Promise<Conn[]>;
+  scan?: () => Promise<Conn[] | NetworkScanResult>;
+  onVisibility?: (visibility: NetworkVisibility, note: string | null) => void;
 }
 
 export class NetworkAdapter implements Adapter {
   name = 'network';
   private pollMs: number;
   private all: boolean;
-  private scan: () => Promise<Conn[]>;
+  private scan: () => Promise<Conn[] | NetworkScanResult>;
+  private onVisibility?: (visibility: NetworkVisibility, note: string | null) => void;
   private known = new Map<string, { c: Conn; rel: Relevance }>();
   private ctx: AdapterCtx | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -140,10 +195,11 @@ export class NetworkAdapter implements Adapter {
 
   // all=false → only AI-relevant connections (a known AI process, or a known AI
   // endpoint) are surfaced, so the feed doesn't drown in ordinary traffic.
-  constructor({ pollMs = 10000, all = false, scan = defaultScan }: NetworkAdapterOpts = {}) {
+  constructor({ pollMs = 10000, all = false, scan = defaultScan, onVisibility }: NetworkAdapterOpts = {}) {
     this.pollMs = pollMs;
     this.all = all;
     this.scan = scan;
+    this.onVisibility = onVisibility;
   }
 
   start(ctx: AdapterCtx) {
@@ -219,7 +275,20 @@ export class NetworkAdapter implements Adapter {
     if (!this.ctx || this.busy) return;
     this.busy = true;
     try {
-      const conns = await this.scan();
+      const scanned = await this.scan();
+      const result: NetworkScanResult = Array.isArray(scanned)
+        ? {
+            connections: scanned,
+            visibility: "os_visible",
+            note: "Shows sockets returned by the configured reader.",
+          }
+        : scanned;
+      this.onVisibility?.(result.visibility, result.note);
+      if (result.visibility === "unavailable") {
+        this.warned = false;
+        return;
+      }
+      const conns = result.connections;
       const current = new Map<string, { c: Conn; rel: Relevance }>();
       for (const c of conns) {
         const rel = this.relevance(c);
@@ -230,10 +299,18 @@ export class NetworkAdapter implements Adapter {
         if (!current.has(key)) current.set(key, { c, rel });
       }
       for (const [key, { c, rel }] of current) if (!this.known.has(key)) this.emit(c, rel, 'net_connect');
-      for (const [key, { c, rel }] of this.known) if (!current.has(key)) this.emit(c, rel, 'net_close');
-      this.known = current;
+      if (result.visibility === "os_visible") {
+        for (const [key, { c, rel }] of this.known) if (!current.has(key)) this.emit(c, rel, 'net_close');
+        this.known = current;
+      } else {
+        // A restricted snapshot cannot prove a previously seen socket closed.
+        // Preserve prior state instead of converting missing privilege into a
+        // fabricated close event.
+        this.known = new Map([...this.known, ...current]);
+      }
       this.warned = false;
     } catch (e: any) {
+      this.onVisibility?.("unavailable", "Socket-table query failed. No connections are inferred from an empty result.");
       if (!this.warned) {
         this.warned = true;
         console.error(`[argus/network] scan failed: ${e?.message ?? e}`);

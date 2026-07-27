@@ -248,11 +248,15 @@ export function EnvView({ active }: { active: boolean }) {
         <Section
           title="Outbound AI connections"
           count={openConns.length}
-          note="Connection metadata only — process, endpoint, port. Never contents: modern traffic is TLS-encrypted and reading it would mean breaking your own encryption. This is what makes a browser tab talking to a cloud model visible, since it leaves no local process or file trace."
+          note={`Connection metadata only — process, endpoint, port. Never contents. ${status?.network.note ?? "Socket visibility has not been measured yet."}`}
         >
           <div className="flex flex-col gap-1.5">
             {openConns.length === 0
-              ? <Empty>No AI-relevant connections open right now.</Empty>
+              ? status?.network.visibility === "unavailable"
+                ? <Empty>Network view unavailable. Socket-table access failed; empty data is not proof of no connections.</Empty>
+                : status?.network.visibility === "limited"
+                  ? <Empty>No readable AI-relevant connections. OS permissions may hide other processes and their sockets.</Empty>
+                  : <Empty>No AI-relevant connections visible to this account right now.</Empty>
               : openConns.map((c) => <ConnRow key={`${c.pid}-${c.remote_host || c.remote_ip}`} c={c} />)}
           </div>
         </Section>

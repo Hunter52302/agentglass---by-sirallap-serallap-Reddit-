@@ -23,44 +23,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { normalizePath } from './paths';
 
-const MAX_BYTES = 512 * 1024; // don't snapshot or diff huge/binary files
-
-export interface LineDiff {
-  plus: number;
-  minus: number;
-  start_line: number;
-  sample: string[];
-}
-
 export interface FsChange {
   ts: number;
   path: string;
   action: 'fs_create' | 'fs_write' | 'fs_delete';
-  diff: LineDiff | null;
-}
-
-/** Trim common prefix/suffix line diff — enough for +N/−N counts and a sample
- *  hunk. Full-fidelity diffs come from the agent's own telemetry; this is
- *  corroboration, not a replacement. */
-export function lineDiff(oldStr: string, newStr: string): LineDiff {
-  const a = oldStr === '' ? [] : oldStr.split('\n');
-  const b = newStr === '' ? [] : newStr.split('\n');
-  let start = 0;
-  while (start < a.length && start < b.length && a[start] === b[start]) start++;
-  let endA = a.length;
-  let endB = b.length;
-  while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) {
-    endA--;
-    endB--;
-  }
-  const removed = a.slice(start, endA);
-  const added = b.slice(start, endB);
-  return {
-    plus: added.length,
-    minus: removed.length,
-    start_line: start + 1,
-    sample: [...removed.map((l) => '- ' + l), ...added.map((l) => '+ ' + l)].slice(0, 80),
-  };
 }
 
 // Directories that never carry owner-meaningful agent activity but explode
@@ -91,16 +57,6 @@ export function makeIgnore(dir: string): (p: string) => boolean {
       prefixes.some((pre) => s.startsWith(pre))
     );
   };
-}
-
-function readText(p: string): string | null {
-  try {
-    const buf = fs.readFileSync(p);
-    if (buf.length > MAX_BYTES || buf.includes(0)) return null; // binary/huge
-    return buf.toString('utf8');
-  } catch {
-    return null;
-  }
 }
 
 export interface WatcherHandle {
@@ -139,7 +95,6 @@ export function startWatcher(
     const s = normalizePath(p);
     return !!s && excluded.some((x) => s === x || s.startsWith(x));
   };
-  const cache = new Map<string, string>(); // path -> last text content
   const known = new Set<string>(); // paths seen, to split create vs write
   const pending = new Map<string, { sawRename: boolean; timer: ReturnType<typeof setTimeout> }>();
   let closed = false;
@@ -155,8 +110,7 @@ export function startWatcher(
     if (!st) {
       if (known.has(full)) {
         known.delete(full);
-        cache.delete(full);
-        onChange({ ts: Date.now(), path: normalizePath(full)!, action: 'fs_delete', diff: null });
+        onChange({ ts: Date.now(), path: normalizePath(full)!, action: 'fs_delete' });
       }
       return;
     }
@@ -165,22 +119,14 @@ export function startWatcher(
     // a path via a rename = a genuinely new file.
     const isNew = !known.has(full) && sawRename;
     known.add(full);
-    const text = readText(full);
-    const seeded = cache.has(full);
-    const old = cache.get(full) ?? '';
-    if (text != null) cache.set(full, text);
     if (isNew) {
       onChange({
         ts: Date.now(),
         path: normalizePath(full)!,
         action: 'fs_create',
-        diff: text != null ? lineDiff('', text) : null,
       });
     } else {
-      // A pre-existing file's first change has no baseline → report it without
-      // fabricating a diff; later changes diff against the cache.
-      const diff = text != null && seeded ? lineDiff(old, text) : null;
-      onChange({ ts: Date.now(), path: normalizePath(full)!, action: 'fs_write', diff });
+      onChange({ ts: Date.now(), path: normalizePath(full)!, action: 'fs_write' });
     }
   };
 

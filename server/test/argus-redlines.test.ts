@@ -52,10 +52,10 @@ describe("Argus redline loading", () => {
 
   test("upsert replaces duplicate IDs and rejects invalid input before writing", () => {
     redlines.upsertRedline({ id: "same", target: "first", decision: "flag" });
-    redlines.upsertRedline({ id: "same", target: "second", decision: "kill" });
+    redlines.upsertRedline({ id: "same", target: "second", decision: "gate" });
     const stored = JSON.parse(readFileSync(file, "utf8"));
     expect(stored).toHaveLength(1);
-    expect(stored[0]).toMatchObject({ id: "same", target: "second", decision: "kill" });
+    expect(stored[0]).toMatchObject({ id: "same", target: "second", decision: "gate" });
 
     const before = readFileSync(file, "utf8");
     expect(() => redlines.upsertRedline({ id: "bad", target: "[" })).toThrow();
@@ -64,7 +64,7 @@ describe("Argus redline loading", () => {
 });
 
 describe("command redlines", () => {
-  test.each(["flag", "gate", "kill"] as const)("%s decision survives action and target matching", (decision) => {
+  test.each(["flag", "gate"] as const)("%s decision survives action and target matching", (decision) => {
     save([{ id: decision, kind: "command", action: "^Bash$", target: "git\\s+push", decision }]);
     expect(redlines.evaluate({ action: "Bash", target: "git push origin main" })?.decision).toBe(decision);
     expect(redlines.evaluate({ action: "Write", target: "git push origin main" })).toBeNull();
@@ -84,6 +84,33 @@ describe("protected-path redlines", () => {
     expect(redlines.evaluateFileObservation({ action: "fs_write", path: "/workspace/secrets" })).not.toBeNull();
     expect(redlines.evaluateFileObservation({ action: "fs_create", path: "/workspace/secrets/key.txt" })).not.toBeNull();
     expect(redlines.evaluateFileObservation({ action: "fs_delete", path: "/workspace/secrets-old/key.txt" })).toBeNull();
+  });
+
+  test("legacy kill rules downgrade to review and never expose auto-kill state", () => {
+    save([{ id: "legacy", kind: "command", target: "danger", decision: "kill" }]);
+    expect(redlines.evaluate({ action: "Bash", target: "danger" })).toMatchObject({
+      id: "legacy",
+      decision: "gate",
+    });
+    expect(redlines.redlineStatus().rules[0]).not.toHaveProperty("kill");
+  });
+
+  test("passive filesystem matches remain report-only", () => {
+    save([{
+      id: "observed-only",
+      kind: "file",
+      protected_path: "/workspace/secrets",
+      operations: ["write"],
+      decision: "gate",
+    }]);
+    const observed = redlines.evaluateFileObservation({
+      action: "fs_write",
+      path: "/workspace/secrets/token",
+    });
+    expect(observed).toMatchObject({
+      rule: { id: "observed-only", decision: "gate" },
+    });
+    expect(observed).not.toHaveProperty("containment_available");
   });
 
   test("operation filters and both separator styles are honored", () => {
