@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { layout } from "../src/components/MapGraph.tsx";
+import { activityFocusView, layout } from "../src/components/MapGraph.tsx";
 import type { MapNode } from "../../shared/env.ts";
 
 const nodes: MapNode[] = [
@@ -18,5 +18,19 @@ describe("map orientation", () => {
     const result = layout(nodes, "top-down").laid;
     expect(result[0]!.y).toBeLessThan(result[2]!.y);
     expect(result[0]!.x).toBe(result[2]!.x);
+  });
+});
+
+describe("live activity camera", () => {
+  it("zooms to a readable scale and places the active node near center", () => {
+    const view = activityFocusView({ x: 300, y: 180 }, { width: 1000, height: 700 });
+    expect(view.k).toBe(1.25);
+    expect(view.x + 300 * view.k).toBe(440);
+    expect(view.y + 180 * view.k).toBe(350);
+  });
+
+  it("clamps unsafe custom zoom values", () => {
+    expect(activityFocusView({ x: 0, y: 0 }, { width: 100, height: 100 }, 99).k).toBe(2);
+    expect(activityFocusView({ x: 0, y: 0 }, { width: 100, height: 100 }, 0).k).toBe(0.4);
   });
 });

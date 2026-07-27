@@ -24,6 +24,7 @@
 // that tool call's own write showing up on disk, not a mystery.
 
 import { db, scopeClause } from "../db.ts";
+import { isUnderPath, scopeRoots, workspaceRoot } from "../config.ts";
 import { normalizePath } from "./paths";
 import { envTierStatus } from "./index";
 
@@ -52,8 +53,12 @@ export interface MapNode {
 export interface MapAgent {
   session_id: string;
   source_app: string;
+  /** Volunteered by the reporting hook; never inferred from proximity. */
+  pid: number | null;
   /** Most recently touched path — the agent's position on the tree. */
   current: string | null;
+  /** Tool that produced the current position. */
+  current_tool: string | null;
   /** Recent positions, oldest first, for a movement trail. */
   trail: string[];
   touches: number;
@@ -103,8 +108,21 @@ function commonRoot(paths: string[]): string | null {
   return parts.join("/") || null;
 }
 
-export function buildMap({ limit = 600, nodeCap = 400 }: { limit?: number; nodeCap?: number } = {}): FsMap {
-  const scope = scopeClause();
+export function buildMap({
+  limit = 600,
+  nodeCap = 400,
+  scope: scopeRoot,
+}: {
+  limit?: number;
+  nodeCap?: number;
+  /** Explicit null is useful for whole-machine callers and isolated tests. */
+  scope?: string | null;
+} = {}): FsMap {
+  // `undefined` means use the cockpit's live workspace; explicit null means
+  // whole-machine. Keep that distinction for both halves of the map.
+  const activeScope = scopeRoot === undefined ? workspaceRoot() : scopeRoot;
+  const scope = scopeClause(activeScope);
+  const activeRoots = activeScope ? scopeRoots(activeScope) : [];
 
   // ── labeled layer: agentglass's own tool calls ───────────────────────────
   const placeholders = TOOLS.map(() => "?").join(",");
@@ -157,6 +175,9 @@ export function buildMap({ limit = 600, nodeCap = 400 }: { limit?: number; nodeC
   for (const r of fsRows) {
     const p = normalizePath(String(r.path));
     if (!p) continue;
+    // env_events retains observations from earlier lenses. A scoped cockpit
+    // must not pull old writes from a retired project back into its live map.
+    if (activeRoots.length && !activeRoots.some((root) => isUnderPath(p, root))) continue;
     const times = touchTimes.get(p);
     const claimed = times?.some((t) => Math.abs(t - r.ts) <= CLAIM_WINDOW_MS);
     if (claimed) continue;
@@ -261,25 +282,78 @@ export function buildMap({ limit = 600, nodeCap = 400 }: { limit?: number; nodeC
       if (child.kind === "dir") walk(child.path, depth + 1);
     }
   };
-  if (root) walk(root, 0);
-  else for (const n of inTree) { n.depth = 0; out.push(n); }
+  if (root) {
+    walk(root, 0);
+  } else {
+    // Whole-machine activity is a forest, not a flat list. `commonRoot`
+    // deliberately returns null when paths only share the filesystem root
+    // (for example /Users and /private). Start at every node whose parent is
+    // outside the observed set, then use the same pre-order traversal as a
+    // scoped tree. Besides restoring meaningful depth, this keeps ancestors
+    // ahead of descendants when the node cap slices the result.
+    const forestRoots = inTree
+      .filter((n) => {
+        const parent = n.path.slice(0, n.path.lastIndexOf("/"));
+        return !files.has(parent);
+      })
+      .sort(compareMapNodes);
+    for (const forestRoot of forestRoots) {
+      forestRoot.depth = 0;
+      out.push(forestRoot);
+      if (forestRoot.kind === "dir") walk(forestRoot.path, 1);
+    }
+  }
 
   const truncated = out.length > nodeCap;
 
   // ── agents, positioned ───────────────────────────────────────────────────
+  const pidBySession = new Map<string, number>();
+  try {
+    const pidRows = db.query(`
+      SELECT p.session_id, p.pid
+        FROM env_agent_pids p
+        JOIN (
+          SELECT session_id, MAX(last_seen) AS last_seen
+            FROM env_agent_pids
+           GROUP BY session_id
+        ) latest
+          ON latest.session_id = p.session_id AND latest.last_seen = p.last_seen
+       ORDER BY p.last_seen DESC
+    `).all() as Array<{ session_id: string; pid: number }>;
+    for (const row of pidRows) {
+      if (!pidBySession.has(row.session_id)) pidBySession.set(row.session_id, row.pid);
+    }
+  } catch {
+    // PID evidence is optional. Keep the map available if a partial/older
+    // database has not created the passive-tier table yet.
+  }
+
   const agentMap = new Map<string, MapAgent>();
   // touches are newest-first, so walk backwards to build the trail oldest-first
   for (let i = touches.length - 1; i >= 0; i--) {
     const t = touches[i];
     let a = agentMap.get(t.session_id);
     if (!a) {
-      a = { session_id: t.session_id, source_app: t.source_app, current: null, trail: [], touches: 0, last_ts: 0 };
+      a = {
+        session_id: t.session_id,
+        source_app: t.source_app,
+        pid: pidBySession.get(t.session_id) ?? null,
+        current: null,
+        current_tool: null,
+        trail: [],
+        touches: 0,
+        last_ts: 0,
+      };
       agentMap.set(t.session_id, a);
     }
     a.touches++;
     if (a.trail[a.trail.length - 1] !== t.path) a.trail.push(t.path);
     if (a.trail.length > 12) a.trail.shift();
-    if (t.ts >= a.last_ts) { a.last_ts = t.ts; a.current = t.path; }
+    if (t.ts >= a.last_ts) {
+      a.last_ts = t.ts;
+      a.current = t.path;
+      a.current_tool = t.tool;
+    }
   }
 
   return {

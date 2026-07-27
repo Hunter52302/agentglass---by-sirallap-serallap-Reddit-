@@ -23,6 +23,7 @@ import { db, insertEvent, setSessionTitles, RETENTION_DAYS, type InsertResult } 
 // under its own folder rather than collapsing onto the server's cwd.
 import { projectRootOf, safeAbs } from "./git.ts";
 import { workspaceRoot, inScope } from "./config.ts";
+import { codexKnownProjects, scanCodexOnce } from "./codexTranscripts.ts";
 
 // One root by default; a path.delimiter-separated list (":" on POSIX, ";" on
 // Windows) sweeps several at once — e.g. a WSL home next to a Windows one.
@@ -35,9 +36,15 @@ import { workspaceRoot, inScope } from "./config.ts";
 // real ~/.claude/projects, i.e. the scanner tests would sweep the machine
 // instead of their fixture. It is one env read every 3s.
 function projectsDirs(): string[] {
+  const configured = process.env.AGENTGLASS_PROJECTS_DIR;
+  const desktop = process.platform === "darwin"
+    ? join(homedir(), "Library", "Application Support", "Claude", "local-agent-mode-sessions")
+    : process.platform === "win32"
+      ? join(process.env.APPDATA || join(homedir(), "AppData", "Roaming"), "Claude", "local-agent-mode-sessions")
+      : join(homedir(), ".config", "Claude", "local-agent-mode-sessions");
   return [
     ...new Set(
-      (process.env.AGENTGLASS_PROJECTS_DIR || join(homedir(), ".claude", "projects"))
+      (configured || [join(homedir(), ".claude", "projects"), desktop].join(delimiter))
         .split(delimiter)
         .map((d) => d.trim())
         .filter(Boolean)
@@ -208,7 +215,9 @@ for (const r of db
   projectPaths.set(r.source_app, r.project_path);
 }
 export function knownProjects(): { source_app: string; path: string }[] {
-  return [...projectPaths].map(([source_app, path]) => ({ source_app, path })).sort(
+  const merged = new Map(projectPaths);
+  for (const project of codexKnownProjects()) merged.set(project.source_app, project.path);
+  return [...merged].map(([source_app, path]) => ({ source_app, path })).sort(
     (a, b) => a.source_app.localeCompare(b.source_app)
   );
 }
@@ -320,7 +329,7 @@ function lineToBodies(
   const msg = (o.message ?? {}) as Record<string, unknown>;
   if (!msg || typeof msg !== "object") return [];
 
-  const ts = Date.parse(String(o.timestamp ?? "")) || fallbackTs;
+  const ts = Date.parse(String(o.timestamp ?? o._audit_timestamp ?? "")) || fallbackTs;
   const model = str(msg.model);
   const base = {
     source_app: ctx.source_app,
@@ -627,7 +636,7 @@ async function ingestFile(
     let sniffedSid = "";
     for (const line of lines) {
       if (!line) continue;
-      if (!line.includes('"cwd"') && !line.includes('"sessionId"')) continue;
+      if (!line.includes('"cwd"') && !line.includes('"sessionId"') && !line.includes('"session_id"')) continue;
       // A pathological multi-hundred-MB first line must not block the loop here
       // either; cwd/sessionId live on ordinary small lines, so skipping it costs
       // nothing (the next line carries them).
@@ -635,7 +644,7 @@ async function ingestFile(
       try {
         const o = JSON.parse(line) as Record<string, unknown>;
         sniffedCwd ||= str(o.cwd) ?? "";
-        sniffedSid ||= str(o.sessionId) ?? "";
+        sniffedSid ||= str(o.sessionId) ?? str(o.session_id) ?? "";
       } catch { /* skip malformed line */ }
       if (sniffedCwd && sniffedSid) break;
     }
@@ -907,6 +916,7 @@ export async function scanOnce(onLive: ((r: InsertResult) => void) | null): Prom
       }
     }
   }
+  total += await scanCodexOnce(onLive);
   // Once per sweep, not per file: the tail cache holds every tool call's input
   // for each transcript it follows, which is the one collection here that can
   // grow with session length rather than with the number of projects.

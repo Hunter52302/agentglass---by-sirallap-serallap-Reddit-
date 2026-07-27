@@ -29,9 +29,26 @@ export interface LaidNode extends MapNode {
 }
 
 export type MapOrientation = "left-right" | "top-down";
+export interface MapCameraView { x: number; y: number; k: number }
 
 const COL_W = 190; // horizontal distance per depth level
 const ROW_H = 26; // vertical distance per leaf
+const ACTIVITY_ZOOM = 1.25;
+
+/** Camera target for live follow. Kept pure so its framing stays testable. */
+export function activityFocusView(
+  node: Pick<LaidNode, "x" | "y">,
+  viewport: { width: number; height: number },
+  zoom = ACTIVITY_ZOOM,
+): MapCameraView {
+  const k = Math.max(0.4, Math.min(2, zoom));
+  return {
+    // Leave a little room on the right for the live activity card.
+    x: viewport.width * 0.44 - node.x * k,
+    y: viewport.height * 0.5 - node.y * k,
+    k,
+  };
+}
 
 /**
  * Tidy tree layout.
@@ -112,7 +129,7 @@ interface Menu {
 
 export function MapGraph({
   map, colorOf, trailFor, onPick, picked, onReveal, orientation,
-  following, onToggleFollowing, focusPath, focusTick,
+  following, onToggleFollowing, focusPath, focusTick, focusAgent, root,
 }: {
   map: FsMap;
   colorOf: (id: string) => string;
@@ -125,12 +142,17 @@ export function MapGraph({
   onToggleFollowing: () => void;
   focusPath: string | null;
   focusTick: number;
+  focusAgent: MapAgent | null;
+  root: string | null;
 }) {
   const { laid, width, height } = useMemo(() => layout(map.nodes, orientation), [map.nodes, orientation]);
   const posOf = useMemo(() => new Map(laid.map((n) => [n.path, n])), [laid]);
 
   const wrapRef = useRef<HTMLDivElement | null>(null);
-  const [view, setView] = useState({ x: 40, y: 20, k: 0.75 });
+  const sceneRef = useRef<SVGGElement | null>(null);
+  const [view, setView] = useState<MapCameraView>({ x: 40, y: 20, k: 0.75 });
+  const viewRef = useRef(view);
+  const cameraFrame = useRef<number | null>(null);
   const [menu, setMenu] = useState<Menu | null>(null);
   const drag = useRef<{ x: number; y: number; vx: number; vy: number } | null>(null);
 
@@ -142,6 +164,53 @@ export function MapGraph({
    * already-fitted ref and nudged state, which did nothing at all — the effect's
    * dependencies had not changed, so it never re-ran and the button was inert.
    */
+  const stopCamera = useCallback(() => {
+    if (cameraFrame.current != null) cancelAnimationFrame(cameraFrame.current);
+    cameraFrame.current = null;
+  }, []);
+
+  const commitView = useCallback((next: MapCameraView) => {
+    viewRef.current = next;
+    setView(next);
+  }, []);
+
+  const paintView = useCallback((next: MapCameraView) => {
+    viewRef.current = next;
+    sceneRef.current?.setAttribute("transform", `translate(${next.x},${next.y}) scale(${next.k})`);
+  }, []);
+
+  const animateView = useCallback((target: MapCameraView) => {
+    stopCamera();
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+      commitView(target);
+      return;
+    }
+    const start = viewRef.current;
+    const started = performance.now();
+    const duration = 680;
+    const frame = (now: number) => {
+      const t = Math.min(1, (now - started) / duration);
+      // Smoothstep with a slightly softer landing than CSS ease-in-out.
+      const eased = 1 - Math.pow(1 - t, 3);
+      const next = {
+        x: start.x + (target.x - start.x) * eased,
+        y: start.y + (target.y - start.y) * eased,
+        k: start.k + (target.k - start.k) * eased,
+      };
+      // Move the SVG scene directly so a camera animation does not reconcile
+      // hundreds of nodes on every frame. React receives the final view only.
+      paintView(next);
+      if (t < 1) cameraFrame.current = requestAnimationFrame(frame);
+      else {
+        cameraFrame.current = null;
+        commitView(target);
+      }
+    };
+    cameraFrame.current = requestAnimationFrame(frame);
+  }, [commitView, paintView, stopCamera]);
+
+  useEffect(() => () => stopCamera(), [stopCamera]);
+
   const doFit = useCallback(() => {
     const el = wrapRef.current;
     if (!el || !map.nodes.length) return;
@@ -155,34 +224,45 @@ export function MapGraph({
     // centred vertically is clipped at BOTH ends, and the user cannot tell
     // which way to scroll to find the root.
     const fits = height * k <= r.height;
-    setView({ x: 24, y: fits ? (r.height - height * k) / 2 : 16, k });
-  }, [width, height, map.nodes.length]);
+    stopCamera();
+    commitView({ x: 24, y: fits ? (r.height - height * k) / 2 : 16, k });
+  }, [width, height, map.nodes.length, commitView, stopCamera]);
 
   // Fit once per map shape, not per poll: refitting every 4s would fight the
   // user's own pan and zoom.
-  const shapeKey = `${map.nodes.length}:${map.root ?? ""}:${orientation}`;
+  const shapeKey = `${map.root ?? ""}:${orientation}`;
   const fittedFor = useRef<string | null>(null);
   useEffect(() => {
+    if (!map.nodes.length) return;
     if (fittedFor.current === shapeKey) return;
     fittedFor.current = shapeKey;
     doFit();
   }, [shapeKey, doFit]);
 
-  // Following live keeps the most recently active file in the centre. The
-  // timestamp is a dependency so repeated touches on the same file still
-  // recentre after the user has panned away.
+  // Live follow is an activity camera: each genuinely newer tool event gets a
+  // smooth pan + zoom to its agent's current node. Polls returning the same
+  // event do nothing, which avoids a subtle four-second camera twitch.
+  const followedFor = useRef<string | null>(null);
   useEffect(() => {
-    if (!following || !focusPath) return;
+    if (!following || !focusPath) {
+      followedFor.current = null;
+      stopCamera();
+      commitView(viewRef.current);
+      return;
+    }
+    const signature = `${focusAgent?.session_id ?? ""}:${focusPath}:${focusTick}:${shapeKey}`;
+    if (followedFor.current === signature) return;
     const node = posOf.get(focusPath);
     const el = wrapRef.current;
     if (!node || !el) return;
     const rect = el.getBoundingClientRect();
-    setView((current) => ({
-      ...current,
-      x: rect.width / 2 - node.x * current.k,
-      y: rect.height / 2 - node.y * current.k,
-    }));
-  }, [following, focusPath, focusTick, posOf]);
+    if (!rect.width || !rect.height) return;
+    followedFor.current = signature;
+    animateView(activityFocusView(node, rect));
+  }, [
+    following, focusPath, focusTick, focusAgent?.session_id,
+    posOf, shapeKey, animateView, stopCamera, commitView,
+  ]);
 
   useEffect(() => {
     if (!menu) return;
@@ -199,12 +279,16 @@ export function MapGraph({
     const r = el.getBoundingClientRect();
     const mx = e.clientX - r.left;
     const my = e.clientY - r.top;
-    setView((v) => {
-      const k = Math.max(0.06, Math.min(3, v.k * (e.deltaY < 0 ? 1.12 : 1 / 1.12)));
-      // Zoom about the pointer: keep whatever is under the cursor under it.
-      return { k, x: mx - ((mx - v.x) / v.k) * k, y: my - ((my - v.y) / v.k) * k };
+    stopCamera();
+    const current = viewRef.current;
+    const k = Math.max(0.06, Math.min(3, current.k * (e.deltaY < 0 ? 1.12 : 1 / 1.12)));
+    // Zoom about the pointer: keep whatever is under the cursor under it.
+    commitView({
+      k,
+      x: mx - ((mx - current.x) / current.k) * k,
+      y: my - ((my - current.y) / current.k) * k,
     });
-  }, []);
+  }, [commitView, stopCamera]);
 
   const trails = (map.agents ?? []).filter((a) => !trailFor || a.session_id === trailFor);
 
@@ -215,19 +299,25 @@ export function MapGraph({
       onWheel={onWheel}
       onMouseDown={(e) => {
         if (e.button !== 0) return;
-        drag.current = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y };
+        stopCamera();
+        commitView(viewRef.current);
+        drag.current = { x: e.clientX, y: e.clientY, vx: viewRef.current.x, vy: viewRef.current.y };
       }}
       onMouseMove={(e) => {
         const d = drag.current;
         if (!d) return;
-        setView((v) => ({ ...v, x: d.vx + (e.clientX - d.x), y: d.vy + (e.clientY - d.y) }));
+        commitView({
+          ...viewRef.current,
+          x: d.vx + (e.clientX - d.x),
+          y: d.vy + (e.clientY - d.y),
+        });
       }}
       onMouseUp={() => { drag.current = null; }}
       onMouseLeave={() => { drag.current = null; }}
       style={{ cursor: drag.current ? "grabbing" : "grab" }}
     >
       <svg className="w-full h-full block" onContextMenu={(e) => e.preventDefault()}>
-        <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
+        <g ref={sceneRef} transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
           {/* edges first, so nodes sit on top of them */}
           {laid.map((n) =>
             n.parent && posOf.has(n.parent) ? (
@@ -350,12 +440,53 @@ export function MapGraph({
         </g>
       </svg>
 
+      {following && focusAgent && (
+        <div
+          className="absolute top-3 right-3 w-[min(300px,calc(100%_-_24px))] rounded-xl p-3 pointer-events-none"
+          style={{
+            background: "color-mix(in srgb, var(--bg2) 92%, transparent)",
+            border: `1px solid color-mix(in srgb, ${colorOf(focusAgent.session_id)} 55%, transparent)`,
+            boxShadow: "0 14px 34px -22px var(--shadow)",
+          }}
+        >
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full shrink-0" style={{ background: colorOf(focusAgent.session_id) }} />
+            <span className="text-[10px] uppercase tracking-wide font-semibold" style={{ color: "var(--success)" }}>
+              Live activity
+            </span>
+            <span className="ml-auto text-[9px] tabular-nums" style={{ color: "var(--text4)" }}>
+              {focusAgent.pid == null ? "PID unavailable" : `PID ${focusAgent.pid}`}
+            </span>
+          </div>
+          <div className="mt-1 text-[12px] font-semibold truncate" style={{ color: "var(--text)" }}
+            title={focusAgent.source_app}>
+            {focusAgent.source_app}
+          </div>
+          <div className="mt-0.5 text-[10px] truncate" style={{ color: "var(--text3)" }}
+            title={focusAgent.current ?? ""}>
+            {focusAgent.current
+              ? root && focusAgent.current.startsWith(root + "/")
+                ? focusAgent.current.slice(root.length + 1)
+                : focusAgent.current
+              : "No current file"}
+          </div>
+          <div className="mt-1 flex items-center gap-2 text-[9px]" style={{ color: "var(--text4)" }}>
+            <span>{focusAgent.current_tool ?? "activity"}</span>
+            <span>session {focusAgent.session_id.slice(0, 8)}</span>
+          </div>
+        </div>
+      )}
+
       {/* zoom controls — a trackpad can pinch, a mouse wheel alone cannot
           always, and "I cannot find the tree" is a bad first experience */}
       <div className="absolute bottom-3 right-3 flex items-center gap-1">
         {[["−", 1 / 1.25], ["+", 1.25]].map(([label, f]) => (
           <button key={label as string}
-            onClick={() => setView((v) => ({ ...v, k: Math.max(0.06, Math.min(3, v.k * (f as number))) }))}
+            onClick={() => {
+              stopCamera();
+              const current = viewRef.current;
+              commitView({ ...current, k: Math.max(0.06, Math.min(3, current.k * (f as number))) });
+            }}
             className="w-6 h-6 rounded text-[13px] leading-none transition-opacity hover:opacity-80"
             style={{ background: "var(--bg2)", color: "var(--text2)", border: "1px solid color-mix(in srgb, var(--border) 45%, transparent)" }}>
             {label as string}
@@ -375,7 +506,7 @@ export function MapGraph({
             color: following ? "var(--success)" : "var(--text4)",
             border: `1px solid color-mix(in srgb, ${following ? "var(--success)" : "var(--border)"} 45%, transparent)`,
           }}
-          title={following ? "Stop following current agent files" : "Follow the latest file touched by an agent"}
+          title={following ? "Stop the activity-follow camera" : "Smoothly follow the newest agent activity"}
         >
           <span className="w-1.5 h-1.5 rounded-full" style={{ background: following ? "var(--success)" : "var(--text4)" }} />
           {following ? "LIVE" : "live"}

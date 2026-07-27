@@ -47,6 +47,7 @@ import { WhatsNew } from "./components/WhatsNew.tsx";
 import { SessionModal } from "./components/SessionModal.tsx";
 import { ProjectPicker, PICKER_ANSWERED_KEY } from "./components/ProjectPicker.tsx";
 import { CockpitGrid } from "./components/CockpitGrid.tsx";
+import { GlossaryPopover } from "./components/GlossaryPopover.tsx";
 
 /**
  * Wrap a setState so a poll that answers the same thing twice doesn't commit.
@@ -676,6 +677,7 @@ export default function App() {
       />
       <HelpLegend open={helpOpen} onClose={() => setHelpOpen(false)} />
       <ProjectPicker open={projectOpen} workspace={workspace} onClose={() => setProjectOpen(false)} />
+      <GlossaryPopover />
     </div>
   );
 }

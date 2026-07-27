@@ -23,10 +23,12 @@ import { MapGraph, type MapOrientation } from "./MapGraph.tsx";
 
 /** Which renderer. Persisted, because it is a lasting preference about how you
  *  read this — not a per-visit choice. */
-type MapMode = "nodes" | "tree";
+type MapMode = "map" | "tree";
 const MODE_KEY = "glasses.map.mode";
 const ORIENTATION_KEY = "glasses.map.orientation";
-const FOLLOW_KEY = "glasses.map.follow";
+// The old key was written as "1" before the user made a choice, so a new key
+// is needed to make live follow genuinely opt-in on existing installations.
+const FOLLOW_KEY = "glasses.map.follow.v2";
 
 /** A tree — the filesystem as a place. */
 export function MapIcon({ size = 15 }: { size?: number }) {
@@ -141,6 +143,9 @@ function AgentLegend({
             style={{ background: on ? "color-mix(in srgb, var(--primary) 13%, transparent)" : "transparent" }}>
             <span className="w-2 h-2 rounded-full shrink-0" style={{ background: colorOf(a.session_id) }} />
             <span className="font-medium shrink-0" style={{ color: "var(--text2)" }}>{a.source_app}</span>
+            <span className="text-[9px] shrink-0 tabular-nums" style={{ color: "var(--text4)" }}>
+              {a.pid == null ? "PID —" : `PID ${a.pid}`}
+            </span>
             <span className="truncate" style={{ color: "var(--text4)" }} title={a.current ?? ""}>
               {a.current ? shortPath(a.current, root) : "—"}
             </span>
@@ -234,14 +239,16 @@ export function MapView({ active }: { active: boolean }) {
   const [trailFor, setTrailFor] = useState<string | null>(null);
   const [rowH, setRowH] = useState(ROW_H_FALLBACK);
   const [mode, setMode] = useState<MapMode>(() => {
-    try { return localStorage.getItem(MODE_KEY) === "tree" ? "tree" : "nodes"; } catch { return "nodes"; }
+    // Existing installs stored "nodes" for the spatial map. Treat every
+    // non-tree value as map so the wording can improve without losing state.
+    try { return localStorage.getItem(MODE_KEY) === "tree" ? "tree" : "map"; } catch { return "map"; }
   });
   const [orientation, setOrientation] = useState<MapOrientation>(() => {
     try { return localStorage.getItem(ORIENTATION_KEY) === "top-down" ? "top-down" : "left-right"; }
     catch { return "left-right"; }
   });
   const [following, setFollowing] = useState(() => {
-    try { return localStorage.getItem(FOLLOW_KEY) !== "0"; } catch { return true; }
+    try { return localStorage.getItem(FOLLOW_KEY) === "1"; } catch { return false; }
   });
   const [note, setNote] = useState<string | null>(null);
   useEffect(() => { try { localStorage.setItem(MODE_KEY, mode); } catch { /* private mode */ } }, [mode]);
@@ -322,9 +329,9 @@ export function MapView({ active }: { active: boolean }) {
           <span className="flex items-center gap-2 max-w-[calc(100vw-140px)] overflow-x-auto agw-noscrollbar">
             <span className="flex items-center gap-0.5 p-0.5 rounded-lg"
               style={{ background: "var(--bg2)", border: "1px solid color-mix(in srgb, var(--border) 45%, transparent)" }}>
-              {(["nodes", "tree"] as MapMode[]).map((m) => (
+              {(["map", "tree"] as MapMode[]).map((m) => (
                 <button key={m} onClick={() => setMode(m)}
-                  title={m === "nodes"
+                  title={m === "map"
                     ? "Node map — the filesystem as a place. Trails are readable here because position means something."
                     : "Tree — an indented list. Better for scanning names."}
                   className="px-2 py-0.5 rounded text-[10px] transition-opacity hover:opacity-80"
@@ -336,20 +343,22 @@ export function MapView({ active }: { active: boolean }) {
                 </button>
               ))}
             </span>
-            <span className="flex items-center gap-0.5 p-0.5 rounded-lg"
-              style={{ background: "var(--bg2)", border: "1px solid color-mix(in srgb, var(--border) 45%, transparent)" }}>
-              {(["left-right", "top-down"] as MapOrientation[]).map((item) => (
-                <button key={item} onClick={() => setOrientation(item)}
-                  className="px-2 py-0.5 rounded text-[10px]"
-                  style={{
-                    color: orientation === item ? "var(--primary-hover)" : "var(--text4)",
-                    background: orientation === item ? "color-mix(in srgb, var(--primary) 16%, transparent)" : "transparent",
-                  }}
-                  title={item === "left-right" ? "Roots on the left" : "Roots at the top"}>
-                  {item === "left-right" ? "left → right" : "top ↓ down"}
-                </button>
-              ))}
-            </span>
+            {mode === "map" && (
+              <span className="flex items-center gap-0.5 p-0.5 rounded-lg"
+                style={{ background: "var(--bg2)", border: "1px solid color-mix(in srgb, var(--border) 45%, transparent)" }}>
+                {(["left-right", "top-down"] as MapOrientation[]).map((item) => (
+                  <button key={item} onClick={() => setOrientation(item)}
+                    className="px-2 py-0.5 rounded text-[10px]"
+                    style={{
+                      color: orientation === item ? "var(--primary-hover)" : "var(--text4)",
+                      background: orientation === item ? "color-mix(in srgb, var(--primary) 16%, transparent)" : "transparent",
+                    }}
+                    title={item === "left-right" ? "Roots on the left" : "Roots at the top"}>
+                    {item === "left-right" ? "left → right" : "top ↓ down"}
+                  </button>
+                ))}
+              </span>
+            )}
             <button onClick={() => setFollowing((value) => !value)}
               className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold"
               style={{
@@ -358,7 +367,7 @@ export function MapView({ active }: { active: boolean }) {
                 background: `color-mix(in srgb, ${following ? "var(--success)" : "var(--text4)"} 12%, transparent)`,
               }}>
               <span className="w-1.5 h-1.5 rounded-full" style={{ background: following ? "var(--success)" : "var(--text4)" }} />
-              {following ? "Following live" : "Live paused"}
+              {following ? "Live follow on" : "Live follow off"}
             </button>
             <span className="text-[10px] whitespace-nowrap" style={{ color: "var(--text4)" }}>
               {map?.fs_tier_enabled ? "both layers" : "labeled layer only"}
@@ -391,7 +400,7 @@ export function MapView({ active }: { active: boolean }) {
             </div>
           )}
 
-          {mode === "nodes" && map && map.nodes.length > 0 ? (
+          {mode === "map" && map && map.nodes.length > 0 ? (
             <MapGraph
               map={map}
               colorOf={colorOf}
@@ -404,6 +413,8 @@ export function MapView({ active }: { active: boolean }) {
               onToggleFollowing={() => setFollowing((value) => !value)}
               focusPath={followedAgent?.current ?? null}
               focusTick={followedAgent?.last_ts ?? 0}
+              focusAgent={followedAgent}
+              root={map.root}
             />
           ) : (
             <>
@@ -437,7 +448,7 @@ export function MapView({ active }: { active: boolean }) {
             </h3>
             <p className="text-[10px] leading-relaxed" style={{ color: "var(--text4)" }}>
               From agentglass's own tool calls — the session is known, so the file it touched is labeled.
-              Click one to follow just its trail; the pulsing dot is where it is now.
+              Click one to follow just its trail; the pulsing dot is where it last reported work.
             </p>
             <AgentLegend agents={map?.agents ?? []} colorOf={colorOf} root={map?.root ?? null}
               trailFor={trailFor} onTrail={setTrailFor} />
@@ -478,6 +489,11 @@ export function MapView({ active }: { active: boolean }) {
               </div>
             </div>
           )}
+
+          <div className="mt-auto pt-3 text-[9px] leading-relaxed"
+            style={{ color: "var(--text4)", borderTop: "1px solid color-mix(in srgb, var(--border) 28%, transparent)" }}>
+            Double-click a term anywhere in AgentGlass for a local definition.
+          </div>
         </div>
       </div>
     </div>

@@ -129,7 +129,10 @@ export interface MapNode {
 export interface MapAgent {
   session_id: string;
   source_app: string;
+  /** PID volunteered by this session's hook. */
+  pid: number | null;
   current: string | null;
+  current_tool: string | null;
   trail: string[];
   touches: number;
   last_ts: number;
