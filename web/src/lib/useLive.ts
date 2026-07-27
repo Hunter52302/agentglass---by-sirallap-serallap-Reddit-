@@ -29,7 +29,7 @@ export interface LiveData {
  * flushed on a timer (not per-message) so a busy fleet causes a few renders a
  * second instead of dozens. Rendering pauses entirely while the tab is hidden.
  */
-export function useLive(): LiveData {
+export function useLive(paused = false): LiveData {
   const [events, setEvents] = useState<WatchEvent[]>([]);
   const [conn, setConn] = useState<ConnState>("connecting");
   const [lastEvent, setLastEvent] = useState<WatchEvent | null>(null);
@@ -48,18 +48,30 @@ export function useLive(): LiveData {
   const pending = useRef<WatchEvent[]>([]);
   const seen = useRef(new Set<number>());
   const flushScheduled = useRef(false);
+  // What is currently on screen. Read by the trim below, which used to close
+  // over the first render's empty array and so rebuilt the dedupe set without
+  // the ids it was meant to remember.
+  const shown = useRef(events);
+  shown.current = events;
+  // "Something is covering the dashboard." Rendering behind it is work nobody
+  // can see, and on the desktop app it is work charged to the same CPU that is
+  // trying to scroll whatever opened on top. Held in a ref so the flush reads it
+  // without the callback being rebuilt on each toggle.
+  const pausedRef = useRef(paused);
+  pausedRef.current = paused;
 
   const flush = useCallback(() => {
     flushScheduled.current = false;
-    // Don't touch React state while hidden — just keep the buffer bounded.
-    if (typeof document !== "undefined" && document.hidden) {
+    // Don't touch React state while hidden or covered — just keep the buffer
+    // bounded. Nothing is lost: uncovering flushes at once.
+    if (pausedRef.current || (typeof document !== "undefined" && document.hidden)) {
       if (pending.current.length > MAX_EVENTS) {
         pending.current = pending.current.slice(-MAX_EVENTS);
         // Rebuild the dedup set too, or it grows one id per event for the whole
         // time the tab is backgrounded. Keep the ids already displayed (events)
         // as well as those buffered, so a re-delivery of a shown event is still
         // caught after the trim.
-        seen.current = new Set([...events.map((e) => e.id), ...pending.current.map((e) => e.id)]);
+        seen.current = new Set([...shown.current.map((e) => e.id), ...pending.current.map((e) => e.id)]);
       }
       return;
     }
@@ -210,6 +222,12 @@ export function useLive(): LiveData {
   // on top — this is a monitoring surface people leave on-screen and watch, and
   // freezing the sweep under a still-visible, still-focused window would read as
   // a hung app rather than a saving.
+  // Catch up the moment the dashboard is uncovered — one render for everything
+  // that arrived while it was hidden, instead of five a second into the dark.
+  useEffect(() => {
+    if (!paused) flush();
+  }, [paused, flush]);
+
   useEffect(() => {
     const sync = () => {
       const looking = !document.hidden && document.hasFocus();
@@ -264,10 +282,31 @@ export function useLive(): LiveData {
         connect();
       }
     };
+    /**
+     * The shell moved the server under us: a new port, a new token, or both,
+     * after remote access was toggled or a link revoked.
+     *
+     * The old socket is already dead — its server is gone — but the backoff
+     * would keep the app disconnected for seconds over a change the user just
+     * made and is watching. Reconnect at once, against the URL the api module
+     * has just rebuilt. `unauthorized` is cleared deliberately: a rotated token
+     * is exactly the case where the previous refusal no longer applies.
+     */
+    const onServerChanged = () => {
+      if (disposed.current) return;
+      if (reconnectTimer.current) { clearTimeout(reconnectTimer.current); reconnectTimer.current = null; }
+      retry.current = 0;
+      firstFailAt.current = 0;
+      try { wsRef.current?.close(); } catch { /* already gone */ }
+      wsRef.current = null;
+      connect();
+    };
     document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("agentglass:server-changed", onServerChanged);
     return () => {
       disposed.current = true;
       document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("agentglass:server-changed", onServerChanged);
       if (timer.current) clearTimeout(timer.current);
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
       wsRef.current?.close();

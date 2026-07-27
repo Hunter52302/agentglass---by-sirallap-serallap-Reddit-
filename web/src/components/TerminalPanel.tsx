@@ -11,12 +11,17 @@ import { viewHeaderClass, viewHeaderStyle, viewTitleClass } from "./workspace/Vi
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
+import { SearchAddon } from "@xterm/addon-search";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
+import { openExternal } from "../lib/externalUrl.ts";
 import type { GitRepoRef, TerminalCommands, TmuxWindow } from "../../../shared/types.ts";
 import { api, IS_DEMO, ptyWsUrl, hasToken, probeAuth, reauthPrompt } from "../lib/api.ts";
 import { CommandBar, loadCommands } from "./CommandBar.tsx";
 import { SCROLLBAR_CSS } from "./ChangesModal.tsx";
 import { wantsWebgl, fallBackToDom } from "../lib/termRenderer.ts";
+import { isFindChord } from "../lib/termKeys.ts";
+import { typingWouldLandInApp } from "../lib/termForeground.ts";
 
 const ROOT_KEY = "agentglass.terminalRoot";
 /** The repo the terminal view last used — what a docked console should open
@@ -85,6 +90,9 @@ type Sess = {
   title: string;
   term: Terminal;
   fit: FitAddon;
+  /** Per shell, because a match is a position in *this* scrollback: the find
+   *  bar in the header drives whichever pane has the focus. */
+  search: SearchAddon;
   holder: HTMLDivElement; // xterm's home element — reparented into the panel
   ws: WebSocket | null;
   status: SessStatus;
@@ -180,6 +188,27 @@ const rosterChanged = () => { const before = liveCount; recount(); if (before !=
 // Set by the mounted panel so the terminal itself can close it (Shift+Esc).
 let panelClose: () => void = () => {};
 
+/**
+ * Open the find bar, when there is one to open.
+ *
+ * Set by the terminal view while it is mounted, the same way `panelClose` is.
+ * It stays a no-op returning false everywhere else — a shell in the docked
+ * console strip has no find bar in front of it, and swallowing the key there
+ * would take a chord away from the program running in it and give nothing back.
+ */
+let panelFind: () => boolean = () => false;
+
+/**
+ * Tell the docked console that a command aimed at it was refused.
+ *
+ * `runInConsole` is called from other panels — the Docker one opens a shell
+ * into a container this way — and those callers have nowhere to put the news.
+ * The strip is where the shell is, so the strip is where the notice belongs.
+ * A no-op while no strip is mounted, in which case the boolean return is the
+ * only answer and the caller may ignore it.
+ */
+let consoleBlocked: (cmd: string) => void = () => {};
+
 // The panel is built to keep many shells open at once, so eviction is a last
 // resort rather than routine: it only runs at the server's own ceiling, and it
 // never touches a shell that is still connected — closing a live job to make
@@ -249,7 +278,10 @@ function connect(s: Sess) {
     if (f.t === "ready") {
       reconnected(s);
       s.status = "live"; s.mode = f.mode ?? null; s.shell = f.shell || "shell"; s.canResize = f.resize !== false;
-      if (f.mode === "pipe") s.term.writeln("\x1b[2m(no pty available on this host — plain-pipe shell: TUI apps won't render)\x1b[0m");
+      // Names the cure, not only the symptom: this mode is what a host with no
+      // python3 gets, and "TUI apps won't render" alone left people believing
+      // the terminal itself was broken.
+      if (f.mode === "pipe") s.term.writeln("\x1b[2m(no pty on this host: plain-pipe shell, full-screen programs won't render. Install python3 and reopen; Settings ▸ Requirements has the details.)\x1b[0m");
       for (const d of s.pending.splice(0)) ws.send(JSON.stringify({ t: "in", d }));
       // the fit that ran while connecting may not have reached the server
       ws.send(JSON.stringify({ t: "resize", cols: s.term.cols, rows: s.term.rows }));
@@ -374,6 +406,19 @@ function createSession(root: string): Sess {
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
+  const search = new SearchAddon();
+  term.loadAddon(search);
+  /*
+   * URLs in output become clickable, and open where the user's links open.
+   *
+   * `openExternal` rather than the addon's default handler: it is the one path
+   * the whole app already uses, which the desktop shell intercepts
+   * (`setWindowOpenHandler` in electron/main.js) to hand the URL to the OS
+   * browser instead of opening a chromeless window inside the app. It also
+   * refuses anything that is not http(s), which matters more here than
+   * anywhere else — the text being linkified is whatever a program printed.
+   */
+  term.loadAddon(new WebLinksAddon((_e, uri) => { openExternal(uri); }));
   /*
    * Draw on the GPU when the machine will let us.
    *
@@ -402,7 +447,9 @@ function createSession(root: string): Sess {
   }
   // Shift+Esc closes the panel — plain Esc belongs to the shell (vim, fzf…).
   term.attachCustomKeyEventHandler((e) => {
-    if (e.type === "keydown" && e.key === "Escape" && e.shiftKey) { panelClose(); return false; }
+    if (e.type !== "keydown") return true;
+    if (e.key === "Escape" && e.shiftKey) { panelClose(); return false; }
+    if (isFindChord(e) && panelFind()) return false;
     return true;
   });
   const holder = document.createElement("div");
@@ -411,7 +458,7 @@ function createSession(root: string): Sess {
   // background colour instead of a white flash.
   holder.style.cssText = "width:100%;height:100%;background:var(--bg)";
   const id = `t${++seq}-${Date.now().toString(36)}`;
-  const sess: Sess = { id, root, title: `shell ${sessionsFor(root).length + 1}`, term, fit, holder, ws: null, status: "idle", mode: null, shell: "shell", canResize: true, opened: false, tmux: false, tmuxWindows: [], tmuxSession: null, tmuxPrefix: [], tmuxPrefixAt: 0, pending: [], createdAt: Date.now(), lastUsed: Date.now(), retries: 0, retryTimer: null, subs: new Set() };
+  const sess: Sess = { id, root, title: `shell ${sessionsFor(root).length + 1}`, term, fit, search, holder, ws: null, status: "idle", mode: null, shell: "shell", canResize: true, opened: false, tmux: false, tmuxWindows: [], tmuxSession: null, tmuxPrefix: [], tmuxPrefixAt: 0, pending: [], createdAt: Date.now(), lastUsed: Date.now(), retries: 0, retryTimer: null, subs: new Set() };
   term.onData((d) => {
     sess.lastUsed = Date.now();
     /*
@@ -505,13 +552,121 @@ function killSession(s: Sess) {
   rosterChanged();
 }
 
-/** Type a command into the repo's shell (starting one if needed). */
-function runInShell(s: Sess, cmd: string) {
+/**
+ * Find in scrollback, for whichever pane has the focus.
+ *
+ * Lives in the header rather than floating over the terminal: the shell below
+ * is a fixed grid of cells, and an overlay would cover output while you are
+ * reading it looking for the very thing you searched for.
+ *
+ * The highlight colours are the app's own tokens rather than xterm's defaults,
+ * which are a fixed yellow that disappears on the light themes.
+ */
+function FindBar({ sess, onClose }: { sess: Sess | undefined; onClose: () => void }) {
+  const [q, setQ] = useState("");
+  const [at, setAt] = useState<{ index: number; count: number } | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => { inputRef.current?.focus(); inputRef.current?.select(); }, []);
+
+  // `onDidChangeResults` is the only honest source for "3 of 17": the addon
+  // counts as it walks the buffer, and a running shell keeps adding to it.
+  useEffect(() => {
+    if (!sess) return;
+    const sub = sess.search.onDidChangeResults((r) => setAt(r ? { index: r.resultIndex + 1, count: r.resultCount } : null));
+    return () => { sub.dispose(); };
+  }, [sess]);
+
+  const opts = {
+    decorations: {
+      matchBackground: "#00000000",
+      matchOverviewRuler: readVar(rootStyle(), "--warning", "#fbbf24"),
+      activeMatchBackground: readVar(rootStyle(), "--primary", "#a78bfa"),
+      activeMatchColorOverviewRuler: readVar(rootStyle(), "--primary", "#a78bfa"),
+      matchBorder: readVar(rootStyle(), "--warning", "#fbbf24"),
+    },
+  };
+
+  const step = (back: boolean) => {
+    if (!sess || !q) return;
+    if (back) sess.search.findPrevious(q, opts); else sess.search.findNext(q, opts);
+  };
+
+  // Clearing the term clears the highlights with it — leaving them on screen
+  // after the box is empty is the kind of stale state nobody can dismiss.
+  const change = (v: string) => {
+    setQ(v);
+    if (!sess) return;
+    if (!v) { sess.search.clearDecorations(); setAt(null); return; }
+    sess.search.findNext(v, { ...opts, incremental: true });
+  };
+
+  const close = () => { try { sess?.search.clearDecorations(); } catch { /* disposed */ } onClose(); };
+
+  return (
+    <div className="flex items-center gap-1" onMouseDown={(e) => e.stopPropagation()}>
+      <input
+        ref={inputRef}
+        value={q}
+        onChange={(e) => change(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") { e.preventDefault(); step(e.shiftKey); }
+          if (e.key === "Escape") { e.preventDefault(); close(); }
+        }}
+        placeholder="Find in scrollback…"
+        aria-label="Find in scrollback"
+        className="px-2 py-1 rounded-md text-[11px] outline-none"
+        style={{ width: 190, background: "color-mix(in srgb, var(--bg3) 50%, transparent)", border: "1px solid color-mix(in srgb, var(--border) 40%, transparent)", color: "var(--text)" }}
+      />
+      <span className="text-[10px] tabular-nums t-dim2" style={{ minWidth: 46 }}>
+        {q ? (at?.count ? `${at.index}/${at.count}` : "none") : ""}
+      </span>
+      <button onClick={() => step(true)} disabled={!q} title="Previous match (Shift+Enter)" className="text-[11px] px-1.5 py-1 rounded-lg" style={{ color: "var(--text2)", border: "1px solid color-mix(in srgb, var(--border) 30%, transparent)" }}>↑</button>
+      <button onClick={() => step(false)} disabled={!q} title="Next match (Enter)" className="text-[11px] px-1.5 py-1 rounded-lg" style={{ color: "var(--text2)", border: "1px solid color-mix(in srgb, var(--border) 30%, transparent)" }}>↓</button>
+      <button onClick={close} title="Close find (Esc)" className="text-[11px] px-1.5 py-1 rounded-lg" style={{ color: "var(--text2)", border: "1px solid color-mix(in srgb, var(--border) 30%, transparent)" }}>✕</button>
+    </div>
+  );
+}
+
+/**
+ * "That did not go anywhere, and here is what to do about it."
+ *
+ * Shown when a command was refused because a full-screen program had the
+ * screen. Silence would be worse than the old behaviour: a chip that does
+ * nothing reads as broken, where a chip that types into vim at least tells you
+ * what happened, eventually, badly.
+ */
+function BlockedNotice({ cmd, onSend, onDismiss }: { cmd: string; onSend: () => void; onDismiss: () => void }) {
+  return (
+    <div className="flex items-center gap-2 text-[10.5px] px-2 py-1 rounded-lg min-w-0"
+      style={{ color: "var(--text2)", background: "color-mix(in srgb, var(--warning) 12%, transparent)", border: "1px solid color-mix(in srgb, var(--warning) 35%, transparent)" }}>
+      <span className="truncate" title={`Not sent: ${cmd}`}>
+        A full-screen program is running — <b className="font-mono">{cmd}</b> was not typed
+      </span>
+      <button onClick={onSend} className="shrink-0 px-1.5 py-0.5 rounded" style={{ color: "var(--text)", border: "1px solid color-mix(in srgb, var(--border) 40%, transparent)" }}>Send anyway</button>
+      <button onClick={onDismiss} className="shrink-0 px-1 t-dim2" aria-label="Dismiss">✕</button>
+    </div>
+  );
+}
+
+/**
+ * Type a command into the repo's shell (starting one if needed).
+ *
+ * Returns false without typing anything when a full-screen program has the
+ * screen — vim, htop, lazygit — because the keystrokes would land in it rather
+ * than at a prompt: `:wq` typed into a buffer, `git status` inserted into the
+ * file you were editing. `force` sends it anyway, which is what the notice the
+ * caller shows offers, since only the person watching knows whether the program
+ * on screen wants that line.
+ */
+function runInShell(s: Sess, cmd: string, force = false): boolean {
+  if (!force && typingWouldLandInApp(s.term.buffer.active)) return false;
   const line = cmd + "\r";
   s.lastUsed = Date.now();
   if (s.status === "live" && s.ws?.readyState === WebSocket.OPEN) s.ws.send(JSON.stringify({ t: "in", d: line }));
   else { s.pending.push(line); if (!s.ws) connect(s); }
   s.term.focus();
+  return true;
 }
 
 /**
@@ -521,13 +676,19 @@ function runInShell(s: Sess, cmd: string) {
  * calling this before the strip has mounted converges on one shell rather than
  * racing it into two. `runInShell` queues into `pending` when the socket is not
  * up yet, so the command still runs once it connects.
+ *
+ * Returns false when a full-screen program is holding that shell and the
+ * command was therefore not typed. Callers from other panels get a plain answer
+ * rather than a command that vanished into somebody's editor.
  */
-export function runInConsole(root: string, cmd: string) {
-  if (!root || IS_DEMO) return;
+export function runInConsole(root: string, cmd: string): boolean {
+  if (!root || IS_DEMO) return false;
   const existing = sessionsFor(root).find((x) => x.title === CONSOLE_TITLE);
   const s = existing ?? createSession(root);
   s.title = CONSOLE_TITLE;
-  runInShell(s, cmd);
+  const sent = runInShell(s, cmd);
+  if (!sent) consoleBlocked(cmd);
+  return sent;
 }
 
 // --- the panel ---------------------------------------------------------------
@@ -588,10 +749,19 @@ export function ConsoleStrip({ root: fallbackRoot, open, height, onHeight, onClo
     setRepoOpen(false); setRepoQuery("");
     focusConsole();
   };
-  const runHere = useCallback((cmd: string) => {
+  /** Same guard as the terminal view: a chip must not type into vim. */
+  const [blocked, setBlocked] = useState<string | null>(null);
+  // Also carries refusals from `runInConsole`, which other panels call.
+  useEffect(() => {
+    if (!open) return;
+    consoleBlocked = setBlocked;
+    return () => { consoleBlocked = () => {}; };
+  }, [open]);
+  const runHere = useCallback((cmd: string, force = false) => {
     const s = sessions.get(sid);
     if (!s || IS_DEMO) return;
-    runInShell(s, cmd);
+    if (runInShell(s, cmd, force)) setBlocked(null);
+    else setBlocked(cmd);
   }, [sid]);
 
   // One console shell per repo, reused. `sessionsFor` already orders by
@@ -718,6 +888,12 @@ export function ConsoleStrip({ root: fallbackRoot, open, height, onHeight, onClo
           <CommandBar root={root} disabled={!sid} font={TERM_FONT} onRun={runHere} onClose={focusConsole} dropUp />
         </div>
 
+        {blocked && (
+          <div className="min-w-0" onMouseDown={(e) => e.stopPropagation()}>
+            <BlockedNotice cmd={blocked} onSend={() => { runHere(blocked, true); setBlocked(null); }} onDismiss={() => setBlocked(null)} />
+          </div>
+        )}
+
         <span className="ml-auto text-[9px] t-dim2 shrink-0">Drag to resize</span>
         <button onClick={(e) => { e.stopPropagation(); onClose(); }} onMouseDown={(e) => e.stopPropagation()} className="text-[12px] leading-none px-1.5 t-dim2 hover:opacity-70 shrink-0" title="Hide the console (the shell keeps running)">✕</button>
       </div>
@@ -804,9 +980,17 @@ export function TermView({ active, onClose = () => {} }: { active: boolean; onCl
   const closeRef = useRef(onClose);
   useEffect(() => { closeRef.current = onClose; }, [onClose]);
 
+  /** The find bar is open over the focused pane. Reset when the repo changes:
+   *  a search is about one shell's scrollback, not about the panel. */
+  const [findOpen, setFindOpen] = useState(false);
+  useEffect(() => { setFindOpen(false); }, [root]);
+
   useEffect(() => {
     if (!open || IS_DEMO) return;
     panelClose = () => closeRef.current();
+    // Claim the find chord only while this view is on screen and has a pane to
+    // search — see `panelFind`.
+    panelFind = () => { setFindOpen(true); return true; };
     const mounted: { s: Sess; el: HTMLDivElement; ro: ResizeObserver; unTheme: () => void; stopFit: () => void }[] = [];
     paneIds.forEach((id, i) => {
       const s = sessions.get(id);
@@ -833,6 +1017,7 @@ export function TermView({ active, onClose = () => {} }: { active: boolean; onCl
     if (focused) requestAnimationFrame(() => focused.term.focus());
     return () => {
       panelClose = () => {};
+      panelFind = () => false;
       for (const { s, el, ro, unTheme, stopFit } of mounted) {
         ro.disconnect();
         stopFit();
@@ -979,10 +1164,13 @@ export function TermView({ active, onClose = () => {} }: { active: boolean; onCl
     setFocusIdx(0);
   }, []);
 
-  const run = useCallback((cmd: string) => {
+  /** The command a full-screen program stopped, kept so it can still be sent. */
+  const [blocked, setBlocked] = useState<string | null>(null);
+  const run = useCallback((cmd: string, force = false) => {
     if (!root || IS_DEMO) return;
     const s = sessions.get(paneIds[focusIdx] ?? "") ?? createSession(root);
-    runInShell(s, cmd);
+    if (runInShell(s, cmd, force)) setBlocked(null);
+    else setBlocked(cmd);
   }, [root, paneIds, focusIdx]);
 
   const restart = useCallback(() => {
@@ -1112,7 +1300,18 @@ export function TermView({ active, onClose = () => {} }: { active: boolean; onCl
                   {/* keepTermFocus so none of these buttons — split, restart,
                       clear, the status pill — steals the shell's cursor on
                       press; they act and the terminal keeps the keyboard. */}
-                  <div className="ml-auto flex items-center gap-1.5 shrink-0" onMouseDown={keepTermFocus}>
+                  {/* Find sits outside the keepTermFocus group on purpose: its
+                      input is the one control here that has to take the cursor
+                      off the shell, and closing it hands the cursor back. */}
+                  {blocked && <BlockedNotice cmd={blocked} onSend={() => { run(blocked, true); setBlocked(null); }} onDismiss={() => setBlocked(null)} />}
+
+                  <div className="ml-auto flex items-center gap-1.5 shrink-0">
+                    {findOpen
+                      ? <FindBar sess={sessions.get(paneIds[focusIdx] ?? "")} onClose={() => { setFindOpen(false); focusTerm(); }} />
+                      : <button onMouseDown={keepTermFocus} onClick={() => setFindOpen(true)} disabled={!root || IS_DEMO || disabled} title="Find in scrollback (Ctrl+Shift+F)" className="text-[11px] px-2 py-1 rounded-lg" style={{ color: "var(--text2)", border: "1px solid color-mix(in srgb, var(--border) 30%, transparent)" }}>⌕ Find</button>}
+                  </div>
+
+                  <div className="flex items-center gap-1.5 shrink-0" onMouseDown={keepTermFocus}>
                     <span onClick={status === "unauthorized" ? reauthPrompt : undefined}
                       className={`flex items-center gap-1.5 text-[10px] t-dim2 mr-1 ${status === "unauthorized" ? "cursor-pointer" : ""}`}
                       title={status === "unauthorized" ? "This server needs an access token — click to enter it" : "Shell status"}>

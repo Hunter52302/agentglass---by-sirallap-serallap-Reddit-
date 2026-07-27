@@ -13,7 +13,9 @@
 // channel structured content has into a `claude -p` run.
 import { safeAbs, repoRootOf, gitCapability } from "./git.ts";
 import { inScope, chatBypassAllowed } from "./config.ts";
-import type { ChatImage, ChatImageMediaType } from "../../shared/types.ts";
+import { paneTurnStream, paneEngineCapability } from "./chatpane.ts";
+import { CHAT_EFFORTS } from "../../shared/types.ts";
+import type { ChatImage, ChatImageMediaType, ChatEffort } from "../../shared/types.ts";
 
 const claudeBin = () => Bun.which("claude");
 export const CHAT_ENABLED = !!claudeBin();
@@ -64,6 +66,19 @@ const MAX_ALLOWED = 40;
  *  raise a permission dialog is simply refused — the chat reports "requires
  *  approval" and there is no way to grant it from inside. This is the way out:
  *  the caller says up front what may run without asking. */
+/** How hard to think, as `--effort` takes it.
+ *
+ *  `""` means "say nothing", which is a real answer rather than a missing one:
+ *  someone who set an effort in their own settings.json should not have every
+ *  chat quietly overriding it.
+ *
+ *  Anything outside the CLI's own list is dropped rather than forwarded. This
+ *  value lands on a `claude` command line, so a level invented by a caller
+ *  would either be rejected there or, worse, quietly mean something else. */
+export function effortLevel(v: unknown): ChatEffort | "" {
+  return (CHAT_EFFORTS as readonly string[]).includes(v as string) ? (v as ChatEffort) : "";
+}
+
 export function allowList(v: unknown): string[] {
   if (!Array.isArray(v)) return [];
   return v.filter((t): t is string => typeof t === "string" && TOOL_RE.test(t.trim())).map((t) => t.trim()).slice(0, MAX_ALLOWED);
@@ -197,36 +212,102 @@ export function turnEnvelope(text: string, images: ChatImage[]): string {
   }) + "\n";
 }
 
-export function chatStream(cwd: unknown, message: unknown, model: unknown, resumeId: unknown, mode: unknown, allowedTools?: unknown, images?: unknown): Response {
-  const bin = claudeBin();
-  if (!bin) return err("no local `claude` CLI — install Claude Code to chat", 403);
-  if (process.env.AGENTGLASS_CHAT_DISABLED === "1") return err("chat is disabled (AGENTGLASS_CHAT_DISABLED=1)", 403);
+/** A turn that passed every check, or the refusal to send back instead.
+ *
+ *  Extracted so both engines validate identically. The scope boundary in
+ *  particular is not something a second engine may reimplement and drift on: a
+ *  chat runs a real `claude` with tools in that directory, so the check below is
+ *  the whole of what keeps "open project" from being decorative. */
+export type TurnPlan =
+  | { ok: false; response: Response }
+  | { ok: true; dir: string; text: string; model: string; mode: string; effort: ChatEffort | ""; resumeId: string; images: ChatImage[]; allow: string[] };
+
+export function planTurn(cwd: unknown, message: unknown, model: unknown, resumeId: unknown, mode: unknown, allowedTools?: unknown, images?: unknown, effort?: unknown): TurnPlan {
+  const no = (r: Response): TurnPlan => ({ ok: false, response: r });
+  if (!claudeBin()) return no(err("no local `claude` CLI: install Claude Code to chat (Settings ▸ Requirements lists it, with the install guide)", 403));
+  if (process.env.AGENTGLASS_CHAT_DISABLED === "1") return no(err("chat is disabled (AGENTGLASS_CHAT_DISABLED=1)", 403));
   const dir = safeAbs(cwd);
   if (!dir || !repoRootOf(dir)) {
     // With no git, repoRootOf fails for every directory — name the real cause
     // rather than blaming the folder.
     const cap = gitCapability();
-    return err(cap.available ? "invalid or non-repo directory" : (cap.reason || "git is not installed"));
+    return no(err(cap.available ? "invalid or non-repo directory" : (cap.reason || "git is not installed")));
   }
   // The last write path still outside the scope boundary (#67 covered git and
   // the terminal). A chat runs a real `claude` with tools in that directory, so
   // it can change anything a shell could — leaving it machine-wide would have
   // made the boundary decorative in exactly the place it matters most.
-  if (!inScope(dir)) return err("outside the open project — open the parent folder to work across repos", 403);
+  if (!inScope(dir)) return no(err("outside the open project — open the parent folder to work across repos", 403));
   const imgs = chatImages(images);
-  if (!imgs) return err("invalid image attachment");
-  if (typeof message !== "string" || message.length > 100_000) return err("invalid message");
+  if (!imgs) return no(err("invalid image attachment"));
+  if (typeof message !== "string" || message.length > 100_000) return no(err("invalid message"));
   // An image on its own is a complete thought ("what's wrong with this?"), so a
   // turn only needs text when it carries nothing else.
-  if (!message.trim() && !imgs.length) return err("invalid message");
+  if (!message.trim() && !imgs.length) return no(err("invalid message"));
   // Keep in step with DEFAULT_MODEL in web/src/lib/chatStore.ts — this is the
   // same default, reached when a caller sends no model or a malformed one.
   const m = typeof model === "string" && MODEL_RE.test(model) ? model : "claude-opus-5";
   let pm = typeof mode === "string" && MODES.has(mode) ? mode : "default";
   if (pm === "bypassPermissions" && !BYPASS_ALLOWED) pm = "default"; // opt-in only
   const rid = typeof resumeId === "string" && SESSION_RE.test(resumeId) ? resumeId : "";
+  const allow = pm === "bypassPermissions" ? [] : allowList(allowedTools);
+  return { ok: true, dir, text: message, model: m, mode: pm, effort: effortLevel(effort), resumeId: rid, images: imgs, allow };
+}
+
+/** Which engine a chat uses when the request does not say.
+ *
+ *  `process` — the original: one `claude -p` per turn, nothing left running.
+ *  `tmux`    — one interactive `claude` per chat, alive in a pane of our own
+ *              tmux server, resumable from the user's terminal.
+ *
+ *  The default stays `process` because the pane engine trades memory for
+ *  latency (a warm CLI is ~380MB and climbs), and that is a bargain the operator
+ *  should strike deliberately rather than discover. */
+export const CHAT_ENGINE_DEFAULT = process.env.AGENTGLASS_CHAT_ENGINE === "tmux" ? "tmux" : "process";
+
+/** Route one turn to the engine it asked for.
+ *
+ *  Validation happens once, before the split, so neither engine can be reached
+ *  with a directory the other would have refused. */
+export function chatSend(b: Record<string, unknown>): Response {
+  const plan = planTurn(b.cwd, b.message, b.model, b.resumeId, b.mode, b.allowedTools, b.images, b.effort);
+  if (!plan.ok) return plan.response;
+  const want = b.engine === "tmux" || b.engine === "process" ? b.engine : CHAT_ENGINE_DEFAULT;
+  if (want !== "tmux") return chatStreamPlanned(plan);
+  const cap = paneEngineCapability();
+  // Falling back silently would be the wrong kindness: the whole point of the
+  // pane engine is that the session is attachable from a terminal, and a chat
+  // that quietly is not would be discovered at the worst moment. Say so.
+  if (!cap.available) return err(`tmux chat panes unavailable — ${cap.reason}`, 409);
+  return paneTurnStream({
+    cwd: plan.dir,
+    message: plan.text,
+    model: plan.model,
+    mode: plan.mode,
+    effort: plan.effort,
+    // A chat with no session yet gets its id decided here rather than discovered
+    // from the CLI: the pane has to be named something before it is launched,
+    // and `--session-id` is what makes the two agree.
+    sessionId: plan.resumeId || crypto.randomUUID(),
+    images: plan.images,
+  });
+}
+
+export function chatStream(cwd: unknown, message: unknown, model: unknown, resumeId: unknown, mode: unknown, allowedTools?: unknown, images?: unknown): Response {
+  const plan = planTurn(cwd, message, model, resumeId, mode, allowedTools, images);
+  if (!plan.ok) return plan.response;
+  return chatStreamPlanned(plan);
+}
+
+function chatStreamPlanned(plan: Extract<TurnPlan, { ok: true }>): Response {
+  const bin = claudeBin()!;
+  const { dir, text: msgText, model: m, mode: pm, resumeId: rid, images: imgs } = plan;
 
   const args = [bin, "-p", "--output-format", "stream-json", "--verbose", "--model", m];
+  // Same flag both engines use. Verified it applies to `-p` as well as to an
+  // interactive session, which is what makes the chat's dial mean the same
+  // thing whichever engine a chat happens to run on.
+  if (plan.effort) args.push("--effort", plan.effort);
   // Structured input is only switched on for a turn that actually needs it.
   // Plain text is the overwhelmingly common case and its path through `claude`
   // is the well-trodden one; `--input-format stream-json` is comparatively
@@ -236,8 +317,7 @@ export function chatStream(cwd: unknown, message: unknown, model: unknown, resum
   if (pm === "bypassPermissions") args.push("--dangerously-skip-permissions");
   else args.push("--permission-mode", pm);
   // Only meaningful for the prompting modes — bypass already allows everything.
-  const allow = pm === "bypassPermissions" ? [] : allowList(allowedTools);
-  if (allow.length) args.push("--allowedTools", ...allow);
+  if (plan.allow.length) args.push("--allowedTools", ...plan.allow);
   if (rid) args.push("--resume", rid);
 
   // Its own process group, so stopping a turn reaches the whole job tree.
@@ -246,7 +326,7 @@ export function chatStream(cwd: unknown, message: unknown, model: unknown, resum
   const setsid = Bun.which("setsid");
   const proc = Bun.spawn(setsid ? [setsid, ...args] : args, {
     cwd: dir,
-    stdin: new TextEncoder().encode(imgs.length ? turnEnvelope(message.trim(), imgs) : message),
+    stdin: new TextEncoder().encode(imgs.length ? turnEnvelope(msgText.trim(), imgs) : msgText),
     stdout: "pipe",
     stderr: "pipe",
     env: { ...process.env },

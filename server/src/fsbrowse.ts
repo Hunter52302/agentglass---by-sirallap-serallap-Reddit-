@@ -28,7 +28,7 @@
 
 import { readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve, join, dirname, basename, sep, isAbsolute } from "node:path";
+import { resolve, join, dirname, basename, sep } from "node:path";
 import { SKIP_DIRS } from "./gitwork.ts";
 import type { FsEntry, FsCompletion } from "../../shared/types.ts";
 
@@ -66,6 +66,18 @@ function expandHome(p: string): string {
  * the desktop app happened to be launched from — completions that shift
  * depending on how you started the process are worse than none.
  */
+// `resolve()`/`dirname()`/`basename()` below are OS-native, so on a real
+// Windows install they already understand `C:\Users\x` correctly; the bug is
+// entirely in these two guards rejecting it before that code ever runs.
+const DRIVE_LETTER_ROOT = /^[a-zA-Z]:[\\/]/;
+
+/** Absolute by POSIX convention (`/...`) or by Windows drive-letter
+ *  convention (`C:\...` / `C:/...`). Pure string check, no OS dependency, so
+ *  it behaves the same regardless of which platform runs it. */
+export function isAbsoluteLike(p: string): boolean {
+  return p.startsWith("/") || DRIVE_LETTER_ROOT.test(p);
+}
+
 export function splitPrefix(input: unknown): { dir: string; partial: string } | null {
   if (typeof input !== "string") return null;
   // A NUL truncates the path at the syscall boundary, so `/safe\0/../../etc`
@@ -74,23 +86,13 @@ export function splitPrefix(input: unknown): { dir: string; partial: string } | 
   if (input.includes("\0")) return null;
   const raw = input.trim();
   if (!raw) return null;
-  // Absolute-or-home only. `isAbsolute` rather than a "/" prefix: on Windows an
-  // absolute path is `C:\…` or `\\server\share`, so a prefix test rejected every
-  // real path on that platform and left the picker's completion dead there.
-  if (!raw.startsWith("~") && !isAbsolute(raw)) return null;
+  if (!isAbsoluteLike(raw) && !raw.startsWith("~")) return null;
   const expanded = expandHome(raw);
-  // `~foo` is another user's home and not ours to guess — expandHome leaves it
-  // untouched, so it is still relative here and falls out. Tested with
-  // isAbsolute for the same cross-platform reason: homedir() on Windows is
-  // `C:\Users\name`, which is absolute but does not start with "/".
-  if (!isAbsolute(expanded)) return null;
+  if (!isAbsoluteLike(expanded)) return null; // `~foo` — another user's home, not ours to guess
   // Ask the *raw* input about the trailing separator: join() drops it while
   // expanding `~/`, which would turn "list my home" into "filter /home by my
   // username". Bare `~` counts as committed for the same reason.
-  // Windows accepts either separator, and anyone typing a path there uses a
-  // backslash — treating only "/" as "list inside this directory" made
-  // `C:\Users\` filter C:\ by the literal text "Users" instead of listing it.
-  const committed = raw.endsWith("/") || raw.endsWith(sep) || raw === "~";
+  const committed = raw.endsWith("/") || raw.endsWith("\\") || raw === "~";
   // resolve() collapses `.`, `..` and doubled separators, so what we list is
   // always the real target rather than a path that merely spells it.
   if (committed) return { dir: resolve(expanded), partial: "" };

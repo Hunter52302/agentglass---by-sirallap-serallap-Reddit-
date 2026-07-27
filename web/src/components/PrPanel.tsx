@@ -19,28 +19,55 @@
 //
 // 4. Nothing waits on the network. `gh` costs a second or more per call and the
 //    server has one thread; every read is a cached answer with its age shown.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { viewHeaderClass, viewHeaderStyle, viewTitleClass } from "./workspace/ViewHeader.tsx";
 import type {
   PrSummary, PrDetail, PrRepoId, PrThread, PrComment, PrReview, PrCheck, GitRepoRef, FileChange,
+  PrReaction, PrAuthorAssociation, PrEvent, PrCommit, PrFile, PrCheckJob,
 } from "../../../shared/types.ts";
 import { api } from "../lib/api.ts";
+import { depSpec } from "../../../shared/deps.ts";
 import { useSidebarWidth } from "../lib/sidebarWidth.ts";
 import { SidebarGrip } from "./SidebarGrip.tsx";
 import { useDialogs } from "./ConfirmDialog.tsx";
-import { SCROLLBAR_CSS, CODE_FONT_STYLE, UnifiedDiff, SplitDiff, Toggle } from "./ChangesModal.tsx";
-import { parseBody, parseUnifiedDiff, newLineNumbers, type MdBlock, type ParsedFile } from "../lib/prBody.ts";
+import { SCROLLBAR_CSS, LINEBTN_CSS, CODE_FONT_STYLE, UnifiedDiff, SplitDiff, Toggle, type LinePick, type LineSel } from "./ChangesModal.tsx";
+import { HiliteCtx, useDiffHighlight } from "../lib/diffHighlight.ts";
+import { Select } from "./Select.tsx";
+import { parseBody, parseUnifiedDiff, newLineNumbers, diffKind, type MdBlock, type ParsedFile } from "../lib/prBody.ts";
 import { stepFileIndex } from "../lib/prNav.ts";
 import { PrFilterBar } from "./PrFilterBar.tsx";
-import { parseQuery, applyFilters, buildFacets, activeCount } from "../lib/prFilter.ts";
+import { Avatar } from "./Avatar.tsx";
+import { parseQuery, sortRows, buildFacets, activeCount, type RepoFacets } from "../lib/prFilter.ts";
+import { getHighlighter, shikiTheme } from "../lib/highlight.ts";
+import { externalUrl, openExternal } from "../lib/externalUrl.ts";
 
 type Filter = "mine" | "review" | "all";
 type Tab = "overview" | "conversation" | "commits" | "files" | "checks" | "review";
+// The open/closed axis, orthogonal to the scope views. "closed" holds merged +
+// closed, exactly like GitHub's own Closed tab; "all" is everything.
+type StateSel = "open" | "closed" | "all";
+const STATES: { id: StateSel; label: string }[] = [
+  { id: "open", label: "Open" },
+  { id: "closed", label: "Closed" },
+  { id: "all", label: "All" },
+];
 
-const FILTERS: { id: Filter; label: string; hint: string }[] = [
-  { id: "mine", label: "Mine", hint: "Pull requests you opened" },
-  { id: "review", label: "Review", hint: "Waiting on your review" },
-  { id: "all", label: "All", hint: "Every open pull request" },
+/**
+ * Saved views: a scope and a query, together, under one name.
+ *
+ * The three scopes are what the server can fetch; the interesting questions
+ * ("what of mine is red", "what of mine could land right now") are a scope plus
+ * a filter, and asking them used to mean picking a tab and then building the
+ * query by hand every time. A view is only ever shorthand — it writes the same
+ * query string the facets write, so the chips below still show what is on and
+ * still take it off again.
+ */
+const VIEWS: { id: string; label: string; scope: Filter; query: string; tint?: string; hint: string }[] = [
+  { id: "review", label: "Needs my review", scope: "review", query: "", tint: "var(--warning)", hint: "Somebody asked you to look" },
+  { id: "mine", label: "Mine", scope: "mine", query: "", tint: "var(--primary)", hint: "Pull requests you opened" },
+  { id: "failing", label: "Failing", scope: "all", query: "checks:red", tint: "var(--error)", hint: "Open here with a red check" },
+  { id: "ready", label: "Ready", scope: "all", query: "review:approved checks:green", tint: "var(--success)", hint: "Approved and green — these can land" },
+  { id: "all", label: "All", scope: "all", query: "", hint: "Every open pull request" },
 ];
 
 const POLL_MS = 20_000;
@@ -48,7 +75,16 @@ const SEEN_KEY = "agentglass.pr.seen";
 const DRAFT_KEY = "agentglass.pr.drafts";
 
 /** A line comment written but not yet sent — GitHub's "pending review". */
-export interface DraftComment { path: string; line: number; body: string }
+export interface DraftComment {
+  path: string;
+  /** The last line of the comment — GitHub's `line`. */
+  line: number;
+  /** The first, when the comment covers a range. Absent for a single line. */
+  startLine?: number;
+  /** Which side of the diff: RIGHT is the new file, LEFT the old. */
+  side?: "LEFT" | "RIGHT";
+  body: string;
+}
 
 const loadMap = <T,>(k: string): Record<string, T> => {
   try { return JSON.parse(localStorage.getItem(k) || "{}"); } catch { return {}; }
@@ -98,23 +134,6 @@ function Bar({ parts }: { parts: { pct: number; tint: string }[] }) {
   );
 }
 
-/** GitHub's avatar for a login, through the server's allowlisted proxy. The
- *  name is always beside it — the picture is recognition, not identification. */
-function Avatar({ login, size = 18 }: { login: string; size?: number }) {
-  const [failed, setFailed] = useState(false);
-  const initials = (login || "?").replace(/\[bot\]$/, "").slice(0, 2).toUpperCase();
-  if (failed || !login) {
-    return (
-      <span className="shrink-0 rounded-full inline-flex items-center justify-center"
-        style={{ width: size, height: size, background: "var(--primary)", color: "var(--bg)", fontSize: size * 0.42 }}>{initials}</span>
-    );
-  }
-  return (
-    <img src={api.prAssetUrl(`https://avatars.githubusercontent.com/${encodeURIComponent(login.replace(/\[bot\]$/, ""))}?size=48`)}
-      alt="" aria-hidden width={size} height={size} onError={() => setFailed(true)}
-      className="shrink-0 rounded-full" style={{ width: size, height: size, objectFit: "cover" }} />
-  );
-}
 
 function Btn({ children, onClick, disabled, danger, primary, ok, warn, title, small }: {
   children: React.ReactNode; onClick?: () => void; disabled?: boolean;
@@ -127,7 +146,7 @@ function Btn({ children, onClick, disabled, danger, primary, ok, warn, title, sm
   const edge = danger ? "var(--error)" : ok ? "var(--success)" : warn ? "var(--warning)" : primary ? "var(--primary)" : "var(--border)";
   return (
     <button onClick={onClick} disabled={disabled} title={title}
-      className={`rounded disabled:opacity-40 ${small ? "text-[10px] px-2 py-0.5" : "text-[10.5px] px-2.5 py-1"}`}
+      className={`agx-btn rounded disabled:opacity-40 ${small ? "text-[10px] px-2 py-0.5" : "text-[10.5px] px-2.5 py-1"}`}
       style={{
         color: primary ? "var(--bg)" : danger ? "var(--error)" : ok ? "var(--success)" : warn ? "var(--warning)" : "var(--text2)",
         background: primary ? "var(--primary)" : warn ? "color-mix(in srgb, var(--warning) 16%, transparent)" : "transparent",
@@ -150,7 +169,52 @@ function Btn({ children, onClick, disabled, danger, primary, ok, warn, title, sm
  * inline styles cannot reach. `.agx-md` scopes every one of them.
  */
 export const MD_CSS = `
-.agx-md{max-width:78ch;margin:0 auto;line-height:1.7;font-size:12.5px;color:var(--text2)}
+/* Feedback, so a press is legible before the work behind it finishes.
+   :active answers within one frame; :focus-visible keeps the keyboard
+   visible; [data-busy] dims the label and blocks a second press without
+   resizing the button, so the row does not jump under the cursor. */
+.agx-btn{transition:background .13s,border-color .13s,color .13s,transform .07s}
+.agx-btn:active:not(:disabled){transform:translateY(1px) scale(.99)}
+.agx-btn:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
+.agx-btn[data-busy]{pointer-events:none;opacity:.6}
+/* A body fills the box it was given. There used to be a 78ch measure here,
+   borrowed from prose typography, and it was the wrong rule twice over: this
+   panel renders in a monospace face, so ch is a fixed pixel wall (measured at
+   584px) rather than a measure that breathes, and it left a third of a card
+   empty beside text that stopped in mid-air. GitHub caps nothing here either,
+   so the same pull request read narrower in the app than on the page it came
+   from. Reading comfort on a wide display is what the panel width is for. */
+/* One timeline, one rail. The node says what kind of thing happened; the
+   rail says they happened in an order. */
+.agx-tl{position:relative;padding-left:26px}
+.agx-tl::before{content:"";position:absolute;left:9px;top:6px;bottom:6px;width:2px;border-radius:2px;background:color-mix(in srgb,var(--border) 42%,transparent)}
+.agx-ev{position:relative;margin-bottom:10px}
+.agx-ev:last-child{margin-bottom:0}
+.agx-node{position:absolute;left:-26px;top:6px;width:20px;height:20px;border-radius:50%;display:grid;place-items:center;font-size:9px;background:var(--bg);border:2px solid color-mix(in srgb,var(--border) 50%,transparent)}
+/* A small event — opened, force-pushed, review requested. It sits on the same
+   rail as the comments but weighs a fraction of one, because it is context
+   rather than something anybody said. */
+.agx-tiny{position:relative;display:flex;align-items:center;gap:7px;font-size:10.5px;color:var(--text3);padding:3px 0;margin-bottom:10px}
+.agx-tiny .agx-node{top:1px;width:18px;height:18px;left:-26px}
+.agx-tiny b{color:var(--text2);font-weight:500}
+/* menus */
+.agx-menu{background:var(--bg);border:1px solid color-mix(in srgb,var(--primary) 40%,transparent);box-shadow:0 20px 50px -20px #000}
+.agx-mi:hover{background:color-mix(in srgb,var(--primary) 12%,transparent);color:var(--text)}
+.agx-mi:focus-visible{outline:2px solid var(--primary);outline-offset:-2px}
+/* the "＋" that adds a reviewer or a label, inline with the values it extends */
+.agx-inline-add{font-size:10px;padding:1px 6px;border-radius:5px;color:var(--text3);border:1px solid color-mix(in srgb,var(--border) 50%,transparent);transition:color .13s,border-color .13s,background .13s}
+.agx-inline-add:hover:not(:disabled){color:var(--primary);border-color:var(--primary);background:color-mix(in srgb,var(--primary) 10%,transparent)}
+.agx-inline-add:disabled{opacity:.4;cursor:not-allowed}
+/* the viewed switch on a file header — a checkbox does not read as a state you
+   are keeping, and "viewed" is state you keep across a whole review */
+.agx-sw{position:relative;width:24px;height:14px;border-radius:8px;flex:none;background:color-mix(in srgb,var(--border) 50%,transparent);transition:background .17s}
+.agx-sw::after{content:"";position:absolute;top:2px;left:2px;width:10px;height:10px;border-radius:50%;background:var(--text3);transition:transform .17s,background .17s}
+.agx-sw[data-on="1"]{background:color-mix(in srgb,var(--success) 55%,transparent)}
+.agx-sw[data-on="1"]::after{transform:translateX(10px);background:var(--success)}
+.agx-hl pre{margin:0;padding:10px 12px;border-radius:8px;overflow-x:auto;background:color-mix(in srgb,#000 42%,transparent) !important;border:1px solid color-mix(in srgb,var(--border) 30%,transparent)}
+.agx-hl code{font-size:11.5px;line-height:1.65}
+.agx-md .agx-hl{margin:0 0 .85em}
+.agx-md{margin:0;line-height:1.7;font-size:12.5px;color:var(--text2)}
 .agx-md>*:first-child{margin-top:0}
 .agx-md>*:last-child{margin-bottom:0}
 .agx-md p{margin:0 0 .85em}
@@ -178,6 +242,16 @@ export const MD_CSS = `
 .agx-md th{text-align:left;padding:.4em .8em;background:color-mix(in srgb,var(--border) 22%,transparent);color:var(--text);font-weight:600;border:1px solid color-mix(in srgb,var(--border) 40%,transparent);white-space:nowrap}
 .agx-md td{padding:.4em .8em;border:1px solid color-mix(in srgb,var(--border) 30%,transparent);vertical-align:top}
 .agx-md tbody tr:nth-child(even) td{background:color-mix(in srgb,var(--border) 10%,transparent)}
+.agx-md .agx-details{margin:0 0 .9em;border:1px solid color-mix(in srgb,var(--border) 40%,transparent);border-radius:6px;padding:.5em .8em;background:color-mix(in srgb,var(--border) 8%,transparent)}
+.agx-md .agx-details>summary{cursor:pointer;color:var(--text);font-weight:600;list-style:revert}
+.agx-md .agx-details>div{margin-top:.7em}
+.agx-md .agx-suggestion{margin:0 0 .9em;border:1px solid color-mix(in srgb,var(--success) 45%,transparent);border-radius:6px;overflow:hidden}
+.agx-md .agx-suggestion-head{font-size:.8em;letter-spacing:.05em;text-transform:uppercase;padding:.35em .8em;color:var(--success);background:color-mix(in srgb,var(--success) 12%,transparent);display:flex;align-items:center;gap:.7em}
+.agx-md .agx-suggestion-apply{margin-left:auto;text-transform:none;letter-spacing:0;font-size:.95em;padding:.1em .6em;border-radius:5px;border:1px solid color-mix(in srgb,var(--success) 50%,transparent);color:var(--success);cursor:pointer}
+.agx-md .agx-suggestion-apply:disabled{opacity:.45;cursor:default}
+.agx-md .agx-suggestion pre{margin:0;border:0;border-radius:0;background:color-mix(in srgb,var(--success) 6%,transparent)}
+.agx-md .agx-alert{margin:0 0 .9em;padding:.6em .9em;border-left:3px solid;border-radius:0 6px 6px 0;display:flex;flex-direction:column;gap:.3em}
+.agx-md .agx-alert>b{font-size:.82em;letter-spacing:.06em}
 .agx-md hr{border:0;border-top:1px solid color-mix(in srgb,var(--border) 40%,transparent);margin:1.2em 0}
 .agx-md figure{margin:0 0 .9em}
 .agx-md figure img{max-width:100%;border-radius:6px;border:1px solid color-mix(in srgb,var(--border) 40%,transparent);display:block}
@@ -186,6 +260,31 @@ export const MD_CSS = `
 
 /** One markdown block. Images go through the proxy — GitHub's own attachment
  *  URLs answer 404 without the token, and those are the review's evidence. */
+/**
+ * A proposed replacement, with the button that takes it.
+ *
+ * GitHub has no API for this — their Apply button is web-only — so the server
+ * writes the commit itself: read the file at the head of the branch, splice the
+ * lines, commit through `createCommitOnBranch` with the head oid as a guard so
+ * a concurrent push is refused rather than clobbered.
+ */
+function Suggestion({ text }: { text: string }) {
+  const ctx = useContext(SuggestCtx);
+  return (
+    <div className="agx-suggestion">
+      <div className="agx-suggestion-head">
+        <span>Suggested change</span>
+        {ctx && (
+          <button onClick={() => ctx.apply(text)} disabled={ctx.busy}
+            title="Commit this to the pull request's branch"
+            className="agx-btn agx-suggestion-apply">Apply</button>
+        )}
+      </div>
+      <pre><code>{text}</code></pre>
+    </div>
+  );
+}
+
 function Block({ b }: { b: MdBlock }) {
   if (b.kind === "heading") {
     const H = (["h1", "h2", "h3", "h4", "h5", "h6"][b.level - 1] ?? "h6") as "h1";
@@ -193,7 +292,7 @@ function Block({ b }: { b: MdBlock }) {
   }
   if (b.kind === "para") return <p dangerouslySetInnerHTML={{ __html: b.html }} />;
   if (b.kind === "rule") return <hr />;
-  if (b.kind === "code") return <pre><code>{b.text}</code></pre>;
+  if (b.kind === "code") return <CodeBlock text={b.text} lang={b.lang} />;
   if (b.kind === "quote") return <blockquote dangerouslySetInnerHTML={{ __html: b.html }} />;
   if (b.kind === "image") {
     return (
@@ -213,6 +312,29 @@ function Block({ b }: { b: MdBlock }) {
       </div>
     );
   }
+  if (b.kind === "details") {
+    // A real disclosure. Bots fold their output into <details>, and until now
+    // the tags came through escaped — the "collapsed" part of a collapsed
+    // comment was the one thing that did not work.
+    return (
+      <details className="agx-details">
+        <summary>{b.summary}</summary>
+        <div>{b.blocks.map((inner, i) => <Block key={i} b={inner} />)}</div>
+      </details>
+    );
+  }
+  if (b.kind === "alert") {
+    const tint = b.level === "caution" || b.level === "warning" ? "var(--warning)"
+      : b.level === "important" ? "var(--primary)"
+      : b.level === "tip" ? "var(--success)" : "var(--info)";
+    return (
+      <div className="agx-alert" style={{ borderColor: tint, background: `color-mix(in srgb, ${tint} 8%, transparent)` }}>
+        <b style={{ color: tint }}>{b.level.toUpperCase()}</b>
+        <span dangerouslySetInnerHTML={{ __html: b.html }} />
+      </div>
+    );
+  }
+  if (b.kind === "suggestion") return <Suggestion text={b.text} />;
   const isTask = b.items.some((i) => i.checked !== undefined);
   const List = b.ordered ? "ol" : "ul";
   return (
@@ -227,8 +349,63 @@ function Block({ b }: { b: MdBlock }) {
   );
 }
 
+/**
+ * A fenced code block, tokenised by the same shiki highlighter the diff
+ * surfaces already use. The parser has carried `lang` since it was written;
+ * the renderer dropped it and printed plain text, so a code reference from a
+ * person or a bot arrived as prose. Falls back to plain text while the
+ * highlighter loads and whenever the language is unknown — a block that
+ * renders unstyled is fine, one that renders late or blank is not.
+ */
+function CodeBlock({ text, lang }: { text: string; lang?: string }) {
+  const [html, setHtml] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    const id = (lang || "").toLowerCase();
+    if (!id) return;
+    (async () => {
+      try {
+        const hl = await getHighlighter();
+        await hl.loadLanguage(id as never).catch(() => {});
+        if (!hl.getLoadedLanguages().includes(id)) return;
+        const out = hl.codeToHtml(text, { lang: id as never, theme: shikiTheme() });
+        if (live) setHtml(out);
+      } catch { /* unstyled is a fine outcome */ }
+    })();
+    return () => { live = false; };
+  }, [text, lang]);
+  if (html) return <div className="agx-hl" dangerouslySetInnerHTML={{ __html: html }} />;
+  return <pre><code>{text}</code></pre>;
+}
+
+/** Who `@` completes to and which issues `#` does, for the composer. A context
+ *  for the same reason as RepoCtx: the composer is rendered from several places
+ *  and none of them should have to carry this. */
+export type Mentionables = { users: string[]; issues: { number: number; title: string }[] };
+export const MentionCtx = createContext<Mentionables | null>(null);
+
+/** The emoji names the composer offers. Same table the renderer uses. */
+const EMOJI_NAMES: Record<string, string> = {
+  tada: "🎉", rocket: "🚀", sparkles: "✨", bug: "🐛", fire: "🔥", warning: "⚠️",
+  white_check_mark: "✅", x: "❌", "+1": "👍", "-1": "👎", eyes: "👀", heart: "❤️",
+  pray: "🙏", clap: "👏", wrench: "🔧", memo: "📝", lock: "🔒", zap: "⚡",
+  boom: "💥", art: "🎨", recycle: "♻️", bulb: "💡", mag: "🔍", robot: "🤖",
+};
+
+/** The `owner/name` these bodies belong to, so `#123` and bare SHAs can link
+ *  somewhere real. A context because `Md` is rendered from a dozen places and
+ *  threading a prop through all of them to reach the same value is noise. */
+export const RepoCtx = createContext<string | undefined>(undefined);
+
+/** How a suggestion block gets applied. Supplied by whichever thread the
+ *  comment belongs to, because only it knows the file and the lines; a markdown
+ *  block on its own knows neither. Null where there is nothing to apply to (a
+ *  suggestion written in the PR body, say). */
+export const SuggestCtx = createContext<{ apply: (text: string) => void; busy: boolean } | null>(null);
+
 export function Md({ body, className }: { body: string; className?: string }) {
-  const blocks = useMemo(() => parseBody(body), [body]);
+  const repo = useContext(RepoCtx);
+  const blocks = useMemo(() => parseBody(body, repo), [body, repo]);
   if (!body?.trim()) return null;
   return <div className={`agx-md ${className ?? ""}`}>{blocks.map((b, i) => <Block key={i} b={b} />)}</div>;
 }
@@ -246,28 +423,121 @@ function toFileChange(f: ParsedFile, i: number): FileChange {
   };
 }
 
-function DiffPane({ file, split, wrap, onComment }: {
-  file: FileChange; split: boolean; wrap: boolean;
-  onComment?: (line: number) => void;
+/**
+ * The lines around a hunk, fetched on demand.
+ *
+ * A diff only carries what GitHub chose to send — three lines of context — so
+ * the code just above a change is not in the payload at all and there is
+ * nothing to reveal locally. Each expansion asks the server for that slice of
+ * the file at this side of the pull request, twenty lines at a time, the way
+ * GitHub's own chevrons work.
+ */
+function ExpandContext({ root, number, path, from, to, side = "RIGHT" }: {
+  root: string; number: number; path: string; from: number; to: number; side?: "LEFT" | "RIGHT";
 }) {
-  // `hunkAction` is the seam the viewer already offers. A comment anchors to
-  // the last added line of its hunk — the line you are almost always talking
-  // about — falling back to the hunk's last line when it only removes.
-  const action = onComment
-    ? (hi: number) => {
-        const h = file.hunks[hi];
-        if (!h) return null;
-        const nums = newLineNumbers(h);
-        let target = 0;
-        h.lines.forEach((l, i) => { if (l.startsWith("+") && nums[i]) target = nums[i]!; });
-        if (!target) for (let i = nums.length - 1; i >= 0; i--) if (nums[i]) { target = nums[i]!; break; }
-        if (!target) return null;
-        return <button onClick={() => onComment(target)} className="text-[10px] px-1.5 rounded"
-          style={{ color: "var(--primary)", border: "1px solid color-mix(in srgb, var(--primary) 40%, transparent)" }}
-          title={`Comment on line ${target}`}>+ Comment</button>;
-      }
-    : undefined;
-  return split ? <SplitDiff c={file} wrap={wrap} /> : <UnifiedDiff c={file} wrap={wrap} hunkAction={action} />;
+  const [lines, setLines] = useState<string[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  if (from > to) return null;
+  const load = async () => {
+    setBusy(true); setErr(null);
+    const r = await api.prFileSlice(root, number, path, side, from, to).catch(() => null);
+    setBusy(false);
+    if (!r?.ok || !r.lines) { setErr(r?.error || "Could not read that part of the file"); return; }
+    setLines(r.lines);
+  };
+  if (lines) {
+    return (
+      <div className="whitespace-pre px-3 py-0.5 text-[12px]" style={{ ...CODE_FONT_STYLE, color: "var(--text3)", background: "color-mix(in srgb, var(--border) 8%, transparent)" }}>
+        {lines.join("\n")}
+      </div>
+    );
+  }
+  return (
+    <button onClick={load} disabled={busy} title={`Show lines ${from}-${to}`}
+      className="agx-btn w-full text-left px-3 py-0.5 text-[10.5px]"
+      style={{ color: err ? "var(--error)" : "var(--text3)", background: "color-mix(in srgb, var(--border) 10%, transparent)" }}>
+      {err ?? (busy ? "…" : `⌃⌄ Expand ${to - from + 1} line${to - from ? "s" : ""}`)}
+    </button>
+  );
+}
+
+/**
+ * An image, before and after.
+ *
+ * A unified diff cannot say anything about a PNG — the file list reports it as
+ * "no textual diff" and that is the end of it. Both sides are fetched by path
+ * and shown next to each other, which is the whole question an image change
+ * raises: what did it look like, and what does it look like now. Added and
+ * deleted files simply have one side.
+ */
+
+function ImageDiff({ root, number, path, status }: {
+  root: string; number: number; path: string; status: string;
+}) {
+  const [sides, setSides] = useState<{ left?: string; right?: string } | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    const want: ("LEFT" | "RIGHT")[] =
+      status === "added" ? ["RIGHT"] : status === "removed" || status === "deleted" ? ["LEFT"] : ["LEFT", "RIGHT"];
+    Promise.all(want.map((side) => api.prFileSlice(root, number, path, side).then((r) => [side, r] as const).catch(() => [side, null] as const)))
+      .then((res) => {
+        if (!live) return;
+        const out: { left?: string; right?: string } = {};
+        for (const [side, r] of res) {
+          // Text came back for an image: that is an SVG, which is both. Render
+          // it from a data URL rather than round-tripping the bytes again.
+          const url = r?.ok
+            ? (r.url || (r.lines ? `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(r.lines.join("\n"))))}` : ""))
+            : "";
+          if (url) out[side === "LEFT" ? "left" : "right"] = api.prAssetUrl(url);
+        }
+        if (!out.left && !out.right) setErr("Could not read the image on either side");
+        setSides(out);
+      });
+    return () => { live = false; };
+  }, [root, number, path, status]);
+
+  if (err) return <div className="p-3 text-[10.5px]" style={{ color: "var(--text3)" }}>{err}</div>;
+  if (!sides) return <div className="p-3 text-[10.5px]" style={{ color: "var(--text3)" }}>Loading the image…</div>;
+  const pane = (label: string, src?: string, tint?: string) => (
+    <div className="flex-1 min-w-0 p-3 flex flex-col gap-1.5 items-start">
+      <span className="text-[9.5px] uppercase tracking-wider" style={{ color: tint ?? "var(--text3)" }}>{label}</span>
+      {src
+        ? <img src={src} alt="" className="max-w-full rounded" style={{ maxHeight: 320, border: "1px solid color-mix(in srgb, var(--border) 40%, transparent)", background: "repeating-conic-gradient(color-mix(in srgb, var(--border) 22%, transparent) 0% 25%, transparent 0% 50%) 50% / 16px 16px" }} />
+        : <span className="text-[10.5px]" style={{ color: "var(--text3)" }}>—</span>}
+    </div>
+  );
+  return (
+    <div className="flex flex-wrap w-full">
+      {sides.left !== undefined || sides.right === undefined ? pane("before", sides.left, "var(--error)") : null}
+      {sides.right !== undefined || sides.left === undefined ? pane("after", sides.right, "var(--success)") : null}
+    </div>
+  );
+}
+
+function DiffPane({ file, split, wrap, onPick, sel, expand }: {
+  file: FileChange; split: boolean; wrap: boolean;
+  onPick?: (p: LinePick) => void; sel?: LineSel;
+  /** Renders the "expand" strip above each hunk, when the file is one we can
+   *  fetch more of. Absent for a commit diff, which is not a pull request. */
+  expand?: (hunkIndex: number) => React.ReactNode;
+}) {
+  // Syntax highlighting, which this pane never had: `Code` reads the theme out
+  // of `HiliteCtx`, and with no Provider above it every PR diff rendered as
+  // plain monochrome text while the very same viewer in the changes modal came
+  // out coloured. A very long diff drops the theme (not the parse) so a
+  // thousand-line file does not spend its time colouring.
+  const { hilite } = useDiffHighlight(file.file_path);
+  const heavy = file.hunks.reduce((n, h) => n + h.lines.length, 0) > 3000;
+  return (
+    <HiliteCtx.Provider value={heavy ? { ...hilite, theme: null } : hilite}>
+      {split
+        ? <SplitDiff c={file} wrap={wrap} onPick={onPick} sel={sel} />
+        : <UnifiedDiff c={file} wrap={wrap} onPick={onPick} sel={sel} hunkAction={expand} />}
+    </HiliteCtx.Provider>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -310,6 +580,8 @@ function PrRow({ p, active, onSelect }: { p: PrSummary; active: boolean; onSelec
         boxShadow: active ? "inset 2px 0 0 var(--primary)" : undefined,
       }}>
       <div className="flex items-center gap-1.5">
+        {p.state === "MERGED" ? <Chip text="⏣ merged" tint="var(--primary)" title="Merged" />
+          : p.state === "CLOSED" ? <Chip text="⊘ closed" tint="var(--text3)" title="Closed without merging" /> : null}
         <span className="text-[10px] tabular-nums shrink-0" style={{ color: "var(--text3)" }}>#{p.number}</span>
         <span className="text-[11.5px] truncate" style={{ color: "var(--text)" }}>{p.title}</span>
         {p.isCurrentBranch && <Chip text="here" tint="var(--primary)" title="This checkout is on that branch" />}
@@ -336,22 +608,33 @@ function PrRow({ p, active, onSelect }: { p: PrSummary; active: boolean; onSelec
 // panel
 // ---------------------------------------------------------------------------
 
-export function PrView({ active, onOpenChatWith }: { active: boolean; onOpenChatWith?: (cwd: string, prompt: string) => void }) {
+export function PrView({ active, onOpenChatWith }: { active: boolean; onOpenChatWith?: (cwd: string, prompt: string, title: string) => void }) {
   const sidebarW = useSidebarWidth();
   const { ask, askText, dialog } = useDialogs();
 
   const [repos, setRepos] = useState<GitRepoRef[]>([]);
   const [root, setRoot] = useState("");
   const [repo, setRepo] = useState<PrRepoId | null>(null);
-  const [filter, setFilter] = useState<Filter>("mine");
+  /** The panel opens on what is waiting on you, not on what you wrote — that
+   *  is the question a review dashboard exists to answer. If nothing is waiting
+   *  the first load falls through to your own pull requests once, so opening it
+   *  never lands on an empty pane. */
+  const [filter, setFilter] = useState<Filter>("review");
+  const [stateSel, setStateSel] = useState<StateSel>("open");
+  /** Cursors we have walked through. `[]` is page 1; each Next pushes the
+   *  cursor that fetched the page we are about to show, so Previous is a pop.
+   *  GitHub's cursors are opaque and only move forward, so a stack is the only
+   *  way back. */
+  const [pages, setPages] = useState<string[]>([]);
+  const cursor = pages[pages.length - 1];
+  const fellBack = useRef(false);
   // The filter query for the current scope tab — the single source of truth for
   // both the search box and every facet dropdown (parsed in lib/prFilter.ts).
   // Cleared when the scope changes so each tab (mine / review / all) starts
   // fresh; "all" can be hundreds of rows and a facet beats scrolling.
   const [query, setQuery] = useState("");
   const [prs, setPrs] = useState<PrSummary[]>([]);
-  const [counts, setCounts] = useState<Partial<Record<Filter, number>>>({});
-  const [listState, setListState] = useState<{ fetchedAt: number; loading: boolean; checksPending?: boolean; error?: string; needsAuth?: boolean }>({ fetchedAt: 0, loading: false });
+  const [listState, setListState] = useState<{ fetchedAt: number; loading: boolean; checksPending?: boolean; error?: string; needsAuth?: boolean; total?: number; hasNext?: boolean; cursor?: string | null; pageSize?: number }>({ fetchedAt: 0, loading: false });
   const [selected, setSelected] = useState<number | null>(null);
   const [detail, setDetail] = useState<PrDetail | null>(null);
   const [detailErr, setDetailErr] = useState("");
@@ -364,6 +647,40 @@ export function PrView({ active, onOpenChatWith }: { active: boolean; onOpenChat
   const [diff, setDiff] = useState("");
   const [selFile, setSelFile] = useState<string | null>(null);
   const [selCommit, setSelCommit] = useState<string | null>(null);
+  // Which commits have their full message open. Separate from `selCommit`, so
+  // reading the message costs nothing and does not fetch a diff.
+  const [openMsgs, setOpenMsgs] = useState<Set<string>>(new Set());
+  // The CI jobs behind this pull request's checks. Fetched only when the checks
+  // tab is opened — it costs a couple of REST calls and most visits never look.
+  const [jobs, setJobs] = useState<PrCheckJob[]>([]);
+  // Fetched once per repo, cached server-side for five minutes: the composer
+  // wants an instant dropdown, not a live directory.
+  const [mentions, setMentions] = useState<Mentionables | null>(null);
+  /** The repository's own labels, authors, milestones and branches. Derived
+   *  from the loaded page before, which made the Author menu a list of whoever
+   *  happened to be on page one. */
+  const [facetOpts, setFacetOpts] = useState<RepoFacets | null>(null);
+  useEffect(() => {
+    if (!active || !root) return;
+    let live = true;
+    api.prFacets(root)
+      .then((r) => { if (live && r.ok && r.data) setFacetOpts(r.data); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [active, root]);
+  useEffect(() => {
+    if (!active || !root) return;
+    let live = true;
+    api.prMentions(root)
+      .then((r) => { if (live && r.ok && r.data) setMentions(r.data); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [active, root]);
+  const toggleMsg = (oid: string) => setOpenMsgs((cur) => {
+    const next = new Set(cur);
+    if (next.has(oid)) next.delete(oid); else next.add(oid);
+    return next;
+  });
   const [commitText, setCommitText] = useState("");
   const [commitBusy, setCommitBusy] = useState(false);
   const [split, setSplit] = useState(true);
@@ -396,18 +713,23 @@ export function PrView({ active, onOpenChatWith }: { active: boolean; onOpenChat
     if (!root) return;
     const req = ++listReq.current;
     const want = filter;
-    api.prList(root, filter, force).then((r) => {
+    api.prList(root, filter, stateSel, force, cursor, query).then((r) => {
       if (req !== listReq.current) return; // a newer request already won
       setRepo(r.repo);
       setPrs(r.prs);
-      setCounts((c) => ({ ...c, [want]: r.prs.length }));
-      setListState({ fetchedAt: r.fetchedAt, loading: r.loading, checksPending: r.checksPending, error: r.error, needsAuth: r.needsAuth });
+      setListState({ fetchedAt: r.fetchedAt, loading: r.loading, checksPending: r.checksPending, error: r.error, needsAuth: r.needsAuth, total: r.total, hasNext: r.hasNext, cursor: r.cursor ?? null, pageSize: r.pageSize });
       setSelected((cur) => (cur && r.prs.some((p) => p.number === cur) ? cur : r.prs[0]?.number ?? null));
+      // Nothing waiting on you: show your own instead of an empty pane. Once
+      // only, so choosing "Needs my review" yourself is never overruled.
+      if (want === "review" && stateSel === "open" && r.prs.length === 0 && !r.loading && !r.error && !fellBack.current) {
+        fellBack.current = true;
+        setFilter("mine");
+      }
     }).catch((e) => {
       if (req !== listReq.current) return;
       setListState({ fetchedAt: 0, loading: false, error: String(e) });
     });
-  }, [root, filter]);
+  }, [root, filter, stateSel, cursor, query]);
 
   /**
    * Switching filter empties the pane before anything is fetched.
@@ -418,23 +740,69 @@ export function PrView({ active, onOpenChatWith }: { active: boolean; onOpenChat
    */
   const lastScope = useRef<string>("");
   useEffect(() => {
-    const scope = `${root}\u0000${filter}`;
+    const scope = `${root}\u0000${filter}\u0000${stateSel}`;
     if (lastScope.current === scope) return; // re-render, not a switch
     const first = lastScope.current === "";
     lastScope.current = scope;
     if (first) return; // nothing on screen yet to clear
     listReq.current++;
-    setPrs([]);
+    // Back to page one: a cursor belongs to the search it came from, and
+    // carrying it into a different scope asks GitHub to continue a list that no
+    // longer exists. The counts go too — they are per-state, and leaving them
+    // up is how every pill read 0 after switching to Closed.
+    setPages([]);
+    setViewCounts({});
+    // The rows STAY on screen while the new ones are fetched.
+    //
+    // Blanking them meant every switch showed a skeleton for as long as GitHub
+    // took — about a second and a half, and the round trip is the floor, not
+    // something a faster query removes. Keeping the previous list up (dimmed,
+    // and labelled as loading) is what GitHub does, and it turns that second and
+    // a half from a wait into a redraw. `listReq` still guards the answer, so a
+    // slow reply for the scope you left can never land on the one you are in.
     setSelected(null);
     setDetail(null);
     setDetailErr("");
-    setListState((st) => ({ ...st, loading: true, fetchedAt: 0 }));
-  }, [filter, root]);
+    setListState((st) => ({ ...st, loading: true }));
+  }, [filter, root, stateSel]);
 
   // Polling pauses while the view is hidden — no point spending requests on a
   // pane nobody is looking at — and resumes on return. Resuming refreshes; it
   // does not reset.
 
+  /**
+   * Warm the states you are not looking at.
+   *
+   * Each state is its own cache entry on the server, so the first visit to
+   * Closed or All paid the whole fetch — about a second and a half of GitHub —
+   * while the user watched. Touching them once in the background makes the
+   * switch instant. Staggered, because the point is to spend idle time, not to
+   * queue three searches behind the one being waited on.
+   */
+  useEffect(() => {
+    if (!active || !root || listState.loading) return;
+    const others = (["open", "closed", "all"] as StateSel[]).filter((st) => st !== stateSel);
+    const timers = others.map((st, i) => setTimeout(() => {
+      void api.prList(root, filter, st, false).catch(() => {});
+      void api.prCounts(root, st).catch(() => {});
+    }, 1500 + i * 2000));
+    return () => timers.forEach(clearTimeout);
+  }, [active, root, filter, stateSel, listState.loading]);
+
+  /**
+   * Fetch the next page before it is asked for.
+   *
+   * Each page is its own entry in the server's cache, so touching it once means
+   * Next answers from memory instead of waiting on GitHub. Deliberately after a
+   * beat, and never while the current page is still loading: the point is to
+   * spend the idle time, not to compete for it.
+   */
+  useEffect(() => {
+    if (!active || !root || !listState.hasNext || !listState.cursor || listState.loading) return;
+    const next = listState.cursor;
+    const t = setTimeout(() => { void api.prList(root, filter, stateSel, false, next).catch(() => {}); }, 900);
+    return () => clearTimeout(t);
+  }, [active, root, filter, stateSel, listState.hasNext, listState.cursor, listState.loading]);
 
   /**
    * Warm the filters you are not looking at.
@@ -446,14 +814,16 @@ export function PrView({ active, onOpenChatWith }: { active: boolean; onOpenChat
    */
   useEffect(() => {
     if (!active || !root) return;
-    const others = (["mine", "review", "all"] as Filter[]).filter((f) => f !== filter);
-    const timers = others.map((f, i) => setTimeout(() => {
-      api.prList(root, f, false)
-        .then((r) => setCounts((c) => ({ ...c, [f]: r.prs.length })))
-        .catch(() => {});
-    }, 1200 + i * 2500));
-    return () => timers.forEach(clearTimeout);
-  }, [active, root, filter]);
+    let live = true;
+    // One request for all five numbers, and they are the TRUE totals for the
+    // current state — not a tally of the page on screen, which stopped being
+    // the answer the moment the list got pages, and not a stale figure carried
+    // over from a different state.
+    api.prCounts(root, stateSel)
+      .then((r) => { if (live && r.ok && r.counts) setViewCounts(r.counts as unknown as Record<string, number>); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [active, root, stateSel, listState.fetchedAt]);
 
   const loadDetail = useCallback((n: number, force = false) => {
     const req = ++detailReq.current;
@@ -524,8 +894,31 @@ export function PrView({ active, onOpenChatWith }: { active: boolean; onOpenChat
   // editors of it (see lib/prFilter.ts). `filters` is a pure derivation, never
   // stored, so the bar and the menus can never disagree.
   const filters = useMemo(() => parseQuery(query), [query]);
-  const visiblePrs = useMemo(() => applyFilters(prs, filters), [prs, filters]);
-  const facets = useMemo(() => buildFacets(prs, filters), [prs, filters]);
+  const visiblePrs = useMemo(() => sortRows(prs, filters), [prs, filters]);
+  const facets = useMemo(() => buildFacets(prs, filters, facetOpts), [prs, filters, facetOpts]);
+
+  /** What each view last counted.
+   *
+   *  Only the scope currently loaded has rows to count, so a view on another
+   *  scope can only report what it last saw — the same deal the panel already
+   *  makes for the list itself, which shows its own age rather than pretending
+   *  to be live. A view that has never been loaded shows no number at all,
+   *  because a made-up one next to "Failing" is worse than none: you would act
+   *  on it. */
+  const [viewCounts, setViewCounts] = useState<Record<string, number>>({});
+  /**
+   * Only the server's totals. Nothing is counted from the rows on screen.
+   *
+   * A tally of the current page under a pill that filters the whole repository
+   * is not a smaller truth, it is a wrong one — it read "Yoshiofthewire 2" when
+   * he has three, because the third is on page four.
+   */
+  const viewCount = useCallback((v: (typeof VIEWS)[number]): number | null => {
+    const exact = viewCounts[v.id];
+    return typeof exact === "number" ? exact : null;
+  }, [viewCounts]);
+
+  const activeView = VIEWS.find((v) => v.scope === filter && v.query === query.trim());
 
   // If the selected row is filtered out, move the selection to the first row
   // still visible rather than leaving a phantom highlight on a hidden PR — the
@@ -536,6 +929,16 @@ export function PrView({ active, onOpenChatWith }: { active: boolean; onOpenChat
       setSelected(visiblePrs[0]?.number ?? null);
     }
   }, [visiblePrs, selected]);
+
+  useEffect(() => {
+    if (tab !== "checks" || !detail || !root) return;
+    let live = true;
+    setJobs([]);
+    api.prCheckJobs(root, detail.number)
+      .then((r) => { if (live && r.ok && r.jobs) setJobs(r.jobs); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [tab, detail?.number, root]);
 
   // Keyboard nav over the list, keyboard-first like the files tab (which relies
   // on the same thing: App.tsx ignores bare letters while the workspace is open,
@@ -600,30 +1003,51 @@ export function PrView({ active, onOpenChatWith }: { active: boolean; onOpenChat
   }, [busy, flash, loadList, selected, loadDetail]);
 
   const key = repo && detail ? `${repo.key}#${detail.number}` : "";
-  const seenFiles = key ? (seen[key] ?? []) : [];
+  // What GitHub already knows you have read, unioned with this browser's copy.
+  // GitHub's is the authority — it also un-ticks a file that changed after you
+  // marked it — but the local set still counts so a tick shows before the
+  // round trip lands.
+  const seenFiles = useMemo(() => {
+    const local = key ? (seen[key] ?? []) : [];
+    const remote = (detail?.files ?? []).filter((f) => f.viewed).map((f) => f.path);
+    return [...new Set([...remote, ...local])];
+  }, [key, seen, detail]);
   const myDrafts = key ? (drafts[key] ?? []) : [];
 
+  /**
+   * Mark a file read, here and on GitHub.
+   *
+   * This used to be local only, so the tick disagreed with github.com, was lost
+   * on another machine, and never un-ticked itself when the file changed under
+   * you — all three of which GitHub's own state gets right. The local copy is
+   * still written first so the switch answers instantly; the network call is
+   * the one that makes it true anywhere else.
+   */
   const toggleSeen = (path: string) => {
     if (!key) return;
+    let nowViewed = false;
     setSeen((cur) => {
       const list = new Set(cur[key] ?? []);
-      if (list.has(path)) list.delete(path); else list.add(path);
+      if (list.has(path)) list.delete(path); else { list.add(path); nowViewed = true; }
       const next = { ...cur, [key]: [...list] };
       saveMap(SEEN_KEY, next);
       return next;
     });
+    const id = detail?.nodeId;
+    if (id) void api.prFileViewed(root, id, path, nowViewed).catch(() => { /* local tick still stands */ });
   };
 
-  const addDraft = async (path: string, line: number) => {
+  const addDraft = async (path: string, line: number, startLine?: number, side?: "LEFT" | "RIGHT") => {
+    const where = startLine && startLine !== line ? `${startLine}-${line}` : String(line);
     const body = await askText({
-      title: `Comment on ${path.split("/").pop()}:${line}`,
+      title: `Comment on ${path.split("/").pop()}:${where}`,
       body: "Queued with the rest of your review — nothing is sent until you submit.",
       confirmLabel: "Add to review",
       input: { label: "Comment", placeholder: "What needs to change here…" },
     });
     if (!body?.trim() || !key) return;
     setDrafts((cur) => {
-      const next = { ...cur, [key]: [...(cur[key] ?? []), { path, line, body: body.trim() }] };
+      const next = { ...cur, [key]: [...(cur[key] ?? []), { path, line, ...(startLine && startLine !== line ? { startLine } : {}), ...(side ? { side } : {}), body: body.trim() }] };
       saveMap(DRAFT_KEY, next);
       return next;
     });
@@ -648,49 +1072,215 @@ export function PrView({ active, onOpenChatWith }: { active: boolean; onOpenChat
     }
   };
 
-  const doMerge = async () => {
+  const doMerge = async (method: MergeMethod = "squash") => {
     if (!detail) return;
     const head = detail.commits[detail.commits.length - 1]?.oid;
-    const ok = await ask({
-      title: `Merge #${detail.number} into ${detail.baseRefName}?`,
-      body: `${detail.title}\n\nSquash and merge, then delete the branch. This is public and cannot be undone from here.` +
-        (head ? `\n\nPinned to ${head.slice(0, 8)} — if anyone pushes before this lands, GitHub refuses rather than merging a commit you have not seen.` : ""),
-      confirmLabel: "Squash & merge", danger: true,
-    });
-    if (!ok) return;
-    await act("Merge", () => api.prMerge(root, detail.number, "squash", { deleteBranch: true, headSha: head }));
+    const how = method === "squash" ? "Squash and merge" : method === "merge" ? "Create a merge commit" : "Rebase and merge";
+    // The subject is offered for editing because it is what lands on the base
+    // branch for ever. Rebase writes no commit of its own, so there is nothing
+    // to name there and gh rejects the flag.
+    let subject: string | undefined;
+    if (method !== "rebase") {
+      const t = await askText({
+        title: `${how} #${detail.number} into ${detail.baseRefName}`,
+        confirmLabel: how,
+        input: { label: "Commit subject — this is permanent", initial: `${detail.title} (#${detail.number})` },
+      });
+      if (t == null) return;
+      subject = t.trim() || undefined;
+    } else {
+      const ok = await ask({
+        title: `Rebase and merge #${detail.number} into ${detail.baseRefName}?`,
+        body: `${detail.title}\n\nEvery commit is replayed onto ${detail.baseRefName} with new SHAs, and no merge commit is written.`,
+        confirmLabel: "Rebase & merge", danger: true,
+      });
+      if (!ok) return;
+    }
+    await act("Merge", () => api.prMerge(root, detail.number, method, { deleteBranch: true, headSha: head, subject }));
   };
 
+  /**
+   * Close, or reopen a closed one.
+   *
+   * The menu has offered "Reopen pull request" all along and then called close
+   * with `reopen` left false, so reopening was unreachable from the UI while the
+   * server supported it the whole time. The dialog was wrong in the same way,
+   * asking "Close #N?" over a pull request that was already closed.
+   */
   const doClose = async () => {
     if (!detail) return;
+    const reopen = detail.state === "CLOSED";
     const ok = await ask({
-      title: `Close #${detail.number}?`,
-      body: `${detail.title}\n\nClosed without merging. You can reopen it afterwards.`,
-      confirmLabel: "Close pull request", danger: true,
+      title: reopen ? `Reopen #${detail.number}?` : `Close #${detail.number}?`,
+      body: reopen
+        ? `${detail.title}\n\nIt goes back to open, with its comments and reviews intact.`
+        : `${detail.title}\n\nClosed without merging. You can reopen it afterwards.`,
+      confirmLabel: reopen ? "Reopen pull request" : "Close pull request", danger: !reopen,
     });
     if (!ok) return;
-    await act("Close", () => api.prClose(root, detail.number));
+    await act(reopen ? "Reopen" : "Close", () => api.prClose(root, detail.number, reopen));
   };
 
   const doLocalReview = async () => {
     if (!detail) return;
     setBusy(true);
     try {
-      const r = await api.prLocalReview(root, detail.number);
+      const r = await api.prReviewPrompt(root, detail.number);
       if (!r.ok || !r.cwd || !r.prompt) { flash(false, r.error || "Could not prepare the review"); return; }
-      if (onOpenChatWith) { onOpenChatWith(r.cwd, r.prompt); flash(true, `Checked out #${detail.number} — review waiting in chat`); }
-      else flash(true, `Checked out at ${r.cwd}`);
+      if (onOpenChatWith) { onOpenChatWith(r.cwd, r.prompt, `Review #${detail.number}`); flash(true, `#${detail.number} is waiting in chat`); }
+      else flash(false, "The chat is not available here");
     } catch (e) { flash(false, String(e)); }
     finally { setBusy(false); }
   };
 
+  const doEditTitle = async () => {
+    if (!detail) return;
+    const title = await askText({ title: `Rename #${detail.number}`, confirmLabel: "Save", input: { label: "Title", initial: detail.title } });
+    if (!title?.trim() || title.trim() === detail.title) return;
+    await act("Edit title", () => api.prEdit(root, detail.number, { title: title.trim() }));
+  };
+
+  const doEditBody = async (body: string) => {
+    if (!detail) return false;
+    return act("Description", () => api.prEdit(root, detail.number, { body }));
+  };
+
+  /** Labels and reviewers both take a comma-separated list and diff it against
+   *  what is already there, so one box does both adding and removing. */
+  const doLabels = async () => {
+    if (!detail) return;
+    const cur = detail.labels.map((l) => l.name);
+    const next = await askText({
+      title: `Labels on #${detail.number}`, confirmLabel: "Save",
+      input: { label: "Comma-separated — remove one by deleting it", initial: cur.join(", ") },
+    });
+    if (next == null) return;
+    const want = next.split(",").map((s) => s.trim()).filter(Boolean);
+    const add = want.filter((l) => !cur.includes(l));
+    const remove = cur.filter((l) => !want.includes(l));
+    if (add.length === 0 && remove.length === 0) return;
+    await act("Labels", () => api.prLabels(root, detail.number, add, remove));
+  };
+
+  const doReply = async (t: PrThread) => {
+    if (!detail) return;
+    const first = t.comments[0];
+    if (typeof first?.databaseId !== "number") return;
+    const body = await askText({ title: `Reply on ${t.path}${t.line ? `:${t.line}` : ""}`, confirmLabel: "Reply", input: { label: "Reply" } });
+    if (!body?.trim()) return;
+    await act("Reply", () => api.prReply(root, detail.number, first.databaseId as number, body));
+  };
+  /** Toggle an emoji. The node id is the GraphQL one, so the same call serves
+   *  the body, a comment, a review and a line comment. */
+  /**
+   * Take a suggestion.
+   *
+   * Confirmed first: this writes a commit to somebody's branch, which is not
+   * something to do on a stray click. The author of the comment is credited as
+   * a co-author, as GitHub does.
+   */
+  const doApplySuggestion = async (t: PrThread, text: string) => {
+    if (!detail || !t.line) return;
+    const where = `${t.path}:${t.startLine && t.startLine !== t.line ? `${t.startLine}-${t.line}` : t.line}`;
+    const ok = await ask({
+      title: `Apply this suggestion to ${t.path.split("/").pop()}?`,
+      body: `${where}\n\nCommits to ${detail.headRefName}, crediting ${t.comments[0]?.author ?? "the author"}. If anyone has pushed since this loaded, GitHub refuses rather than overwriting them.`,
+      confirmLabel: "Apply suggestion",
+    });
+    if (!ok) return;
+    await act("Suggestion", () => api.prApplySuggestion(root, detail.number, {
+      path: t.path, line: t.line!, startLine: t.startLine ?? undefined,
+      suggestion: text, author: t.comments[0]?.author,
+    }));
+  };
+
+  const doReact = async (nodeId: string, content: string, on: boolean) => {
+    if (!nodeId) return;
+    await act(on ? "Reaction" : "Reaction removed", () => api.prReactTo(root, nodeId, content, on));
+  };
+  const doAssignees = async () => {
+    if (!detail) return;
+    const cur = detail.assignees;
+    const next = await askText({
+      title: `Assignees on #${detail.number}`, confirmLabel: "Save",
+      input: { label: "Comma-separated logins — @me works, remove one by deleting it", initial: cur.join(", ") },
+    });
+    if (next == null) return;
+    const want = next.split(",").map((s) => s.trim().replace(/^@(?!me$)/, "")).filter(Boolean);
+    const add = want.filter((l) => !cur.includes(l));
+    const remove = cur.filter((l) => !want.includes(l));
+    if (add.length === 0 && remove.length === 0) return;
+    await act("Assignees", () => api.prAssignees(root, detail.number, add, remove));
+  };
+  const doMilestone = async () => {
+    if (!detail) return;
+    const next = await askText({
+      title: `Milestone on #${detail.number}`, confirmLabel: "Save",
+      input: { label: "Milestone title — leave empty to clear", initial: detail.milestone ?? "" },
+    });
+    if (next == null) return;
+    if ((next.trim() || null) === (detail.milestone ?? null)) return;
+    await act("Milestone", () => api.prMilestone(root, detail.number, next.trim()));
+  };
+  const doReviewers = async () => {
+    if (!detail) return;
+    const cur = detail.reviewers;
+    const next = await askText({
+      title: `Reviewers on #${detail.number}`, confirmLabel: "Save",
+      input: { label: "Comma-separated logins — remove one by deleting it", initial: cur.join(", ") },
+    });
+    if (next == null) return;
+    const want = next.split(",").map((s) => s.trim().replace(/^@/, "")).filter(Boolean);
+    const add = want.filter((l) => !cur.includes(l));
+    const remove = cur.filter((l) => !want.includes(l));
+    if (add.length === 0 && remove.length === 0) return;
+    await act("Reviewers", () => api.prReviewers(root, detail.number, add, remove));
+  };
+
+  const doCopyLink = async () => {
+    if (!detail) return;
+    try { await navigator.clipboard.writeText(detail.url); flash(true, "Link copied"); }
+    catch { flash(false, "Could not reach the clipboard"); }
+  };
+
+  /** Hand a failing check to the chat pointed at this project, with the job that
+   *  broke named, so the answer is written against the code that failed rather
+   *  than a guess from the name of the job. */
+  const askClaudeAboutCheck = async (check: PrCheck) => {
+    if (!detail || !onOpenChatWith) return;
+    setBusy(true);
+    try {
+      const r = await api.prReviewPrompt(root, detail.number);
+      if (!r.ok || !r.cwd) { flash(false, r.error || "Could not prepare the question"); return; }
+      onOpenChatWith(r.cwd,
+        `The check "${check.name}"${check.workflow ? ` in the ${check.workflow} workflow` : ""} is failing on pull request #${detail.number} (${detail.title}), on branch ${detail.headRefName}.\n\n` +
+        `Read the failure with:  gh run view --log-failed --repo <this repo>  (or the run URL below)\n` +
+        `Read the change with:  gh pr diff ${detail.number}\n\n` +
+        `This working directory is the same project, but not the pull request. Work out why the job is failing and propose the fix. Do not change any files yet.` +
+        (check.url ? `\n\nThe run is at ${check.url}.` : ""),
+        `Check on #${detail.number}`);
+      flash(true, `#${detail.number} is waiting in chat`);
+    } catch (e) { flash(false, String(e)); }
+    finally { setBusy(false); }
+  };
+
+  const doComment = async (body: string) => {
+    if (!detail) return false;
+    return act("Comment", () => api.prComment(root, detail.number, body));
+  };
+
   const lanes = useMemo(() => {
     if (!detail) return { humans: [] as PrReview[], botReviews: [] as PrReview[], humanComments: [] as PrComment[], bots: [] as PrComment[] };
+    // Oldest first, the way a conversation is read — GitHub's order, and the
+    // one the replies were written in. The API hands these back newest-first,
+    // so a thread arrived answered before it was asked.
+    const byTime = <T,>(xs: T[], at: (x: T) => string) =>
+      [...xs].sort((p, q) => at(p).localeCompare(at(q)));
     return {
-      humans: detail.reviews.filter((r) => !r.isBot && (r.body.trim() || r.state !== "COMMENTED")),
-      botReviews: detail.reviews.filter((r) => r.isBot && r.body.trim()),
-      humanComments: detail.comments.filter((c) => !c.isBot),
-      bots: detail.comments.filter((c) => c.isBot),
+      humans: byTime(detail.reviews.filter((r) => !r.isBot && (r.body.trim() || r.state !== "COMMENTED")), (r) => r.submittedAt),
+      botReviews: byTime(detail.reviews.filter((r) => r.isBot && r.body.trim()), (r) => r.submittedAt),
+      humanComments: byTime(detail.comments.filter((c) => !c.isBot), (c) => c.createdAt),
+      bots: byTime(detail.comments.filter((c) => c.isBot), (c) => c.createdAt),
     };
   }, [detail]);
 
@@ -699,7 +1289,9 @@ export function PrView({ active, onOpenChatWith }: { active: boolean; onOpenChat
 
   // You cannot review your own pull request — GitHub does not offer it either,
   // and a review control on every row buries the ones actually waiting on you.
-  const canReview = !!d && !d.viewerDidAuthor;
+  // You cannot review your own work, and you cannot review something that has
+  // already merged or been closed — GitHub takes the review form away too.
+  const canReview = !!d && !d.viewerDidAuthor && d.state === "OPEN";
 
   const TABS: { id: Tab; label: string; n?: number; warn?: boolean }[] = d ? [
     { id: "overview", label: "Overview" },
@@ -711,8 +1303,10 @@ export function PrView({ active, onOpenChatWith }: { active: boolean; onOpenChat
   ] : [];
 
   return (
+    <RepoCtx.Provider value={repo?.nameWithOwner}>
+    <MentionCtx.Provider value={mentions}>
     <div className="flex flex-col h-full min-h-0">
-      <style>{SCROLLBAR_CSS}{MD_CSS}</style>
+      <style>{SCROLLBAR_CSS}{LINEBTN_CSS}{MD_CSS}</style>
 
       <div className={viewHeaderClass} style={viewHeaderStyle}>
         <span className={viewTitleClass} style={{ color: "var(--text)" }}>Pull Requests</span>
@@ -737,22 +1331,42 @@ export function PrView({ active, onOpenChatWith }: { active: boolean; onOpenChat
 
       <div className="flex flex-1 min-h-0">
         <div className="flex flex-col min-h-0 shrink-0" style={{ width: sidebarW }}>
-          <div className="flex gap-1 px-2 py-1.5 border-b shrink-0" style={{ borderColor: "color-mix(in srgb, var(--border) 25%, transparent)" }}>
-            {FILTERS.map((f) => {
-              const n = counts[f.id];
+          <div className="flex gap-1 flex-wrap px-2 py-1.5 border-b shrink-0" style={{ borderColor: "color-mix(in srgb, var(--border) 25%, transparent)" }}>
+            {VIEWS.map((v) => {
+              const n = viewCount(v);
+              const on = activeView?.id === v.id;
               return (
-                <button key={f.id} onClick={() => { setFilter(f.id); setQuery(""); }} title={f.hint}
-                  className="text-[10px] px-2 py-0.5 rounded-full"
+                <button key={v.id} onClick={() => { setFilter(v.scope); setQuery(v.query); }} title={v.hint}
+                  className="agx-btn text-[10px] px-2 py-0.5 rounded-full flex items-center gap-1 shrink-0"
                   style={{
-                    color: filter === f.id ? "var(--bg)" : "var(--text2)",
-                    background: filter === f.id ? "var(--primary)" : "transparent",
-                    border: `1px solid ${filter === f.id ? "var(--primary)" : "color-mix(in srgb, var(--border) 45%, transparent)"}`,
+                    color: on ? "var(--bg)" : "var(--text2)",
+                    background: on ? "var(--primary)" : "transparent",
+                    border: `1px solid ${on ? "var(--primary)" : "color-mix(in srgb, var(--border) 45%, transparent)"}`,
                   }}>
-                  {f.label}
-                  {n ? <span className="ml-1 tabular-nums" style={{ opacity: filter === f.id ? .8 : 1, color: filter === f.id ? undefined : f.id === "review" ? "var(--warning)" : undefined }}>{n}</span> : null}
+                  {v.tint && !on && <span className="rounded-full shrink-0" style={{ width: 5, height: 5, background: v.tint }} />}
+                  {v.label}
+                  {n != null && <span className="tabular-nums" style={{ opacity: on ? .8 : .75 }}>{n}</span>}
                 </button>
               );
             })}
+            {!activeView && (
+              <span className="text-[10px] px-2 py-0.5 rounded-full shrink-0 self-center"
+                style={{ color: "var(--text3)", border: "1px dashed color-mix(in srgb, var(--border) 45%, transparent)" }}>Custom</span>
+            )}
+            {/* Open / Closed / All — the state axis. "Closed" holds merged +
+                closed, like GitHub's own Closed tab. */}
+            <div className="ml-auto flex rounded-full overflow-hidden shrink-0 self-center" style={{ border: "1px solid color-mix(in srgb, var(--border) 45%, transparent)" }}>
+              {STATES.map((s) => (
+                <button key={s.id} onClick={() => setStateSel(s.id)} title={`Show ${s.label.toLowerCase()} pull requests`}
+                  className="agx-btn text-[10px] px-2 py-0.5"
+                  style={{
+                    color: stateSel === s.id ? "var(--bg)" : "var(--text3)",
+                    background: stateSel === s.id ? "var(--primary)" : "transparent",
+                  }}>
+                  {s.label}
+                </button>
+              ))}
+            </div>
           </div>
           {repo && prs.length > 0 && (
             <PrFilterBar
@@ -762,21 +1376,33 @@ export function PrView({ active, onOpenChatWith }: { active: boolean; onOpenChat
               onQuery={setQuery}
               checksPending={listState.checksPending}
               shown={visiblePrs.length}
-              total={prs.length}
+              total={listState.total ?? prs.length}
             />
           )}
           <div ref={listRef} tabIndex={-1} onKeyDown={onListKey} className="flex-1 overflow-y-auto min-h-0 agx-scroll outline-none">
             {listState.needsAuth ? (
               <div className="p-3 text-[11px]" style={{ color: "var(--text3)" }}>
                 <div style={{ color: "var(--warning)" }}>{listState.error || "The GitHub CLI is not set up"}</div>
-                <div className="mt-2">Pull requests come from <code>gh</code>. Install it, run <code>gh auth login</code>, then refresh.</div>
+                {/* Two steps, and the second is the one people miss: an
+                    installed gh that has never logged in reads exactly like a
+                    missing one from here. The link is the project's own page,
+                    not a package-manager line, because the reader's system is
+                    not knowable from here. */}
+                <div className="mt-2">
+                  Pull requests come from <code>gh</code>. Install it (<code>{depSpec("gh")?.url}</code>), run <code>gh auth login</code>, then refresh.
+                </div>
               </div>
             ) : !repo ? (
               <div className="p-3 text-[11px]" style={{ color: "var(--text3)" }}>{listState.error || "No GitHub remote on this repository"}</div>
             ) : prs.length === 0 ? (
               listState.loading ? <Skeletons /> : (
                 <div className="p-3 text-[11px]" style={{ color: "var(--text3)" }}>
-                  {filter === "mine" ? "No open pull requests of yours" : filter === "review" ? "Nothing waiting on your review" : "No open pull requests"}
+                  {(() => {
+                    const what = stateSel === "open" ? "open " : stateSel === "closed" ? "closed " : "";
+                    return filter === "mine" ? `No ${what}pull requests of yours`
+                      : filter === "review" ? "Nothing waiting on your review"
+                      : `No ${what}pull requests`;
+                  })()}
                 </div>
               )
             ) : visiblePrs.length === 0 ? (
@@ -784,10 +1410,37 @@ export function PrView({ active, onOpenChatWith }: { active: boolean; onOpenChat
                 <span>No pull requests match {activeCount(filters) === 1 ? "this filter" : "these filters"}.</span>
                 <button onClick={() => setQuery("")} className="text-[10.5px] px-2 py-0.5 rounded hover:bg-white/5" style={{ color: "var(--primary)", border: "1px solid color-mix(in srgb, var(--primary) 30%, transparent)" }}>Clear filters</button>
               </div>
-            ) : visiblePrs.map((p) => (
-              <PrRow key={p.number} p={p} active={p.number === selected} onSelect={() => { setSelected(p.number); setTab("overview"); }} />
-            ))}
+            ) : (
+              // Dimmed, not blanked, while the next scope loads: you can still
+              // read what is there, and it is obvious it is being replaced.
+              <div style={{ opacity: listState.loading ? 0.45 : 1, transition: "opacity .15s" }}>
+                {visiblePrs.map((p) => (
+                  <PrRow key={p.number} p={p} active={p.number === selected} onSelect={() => { setSelected(p.number); setTab("overview"); }} />
+                ))}
+              </div>
+            )}
           </div>
+          {/* Pages, because a repository has more pull requests than one screen
+              of them and the panel used to stop at the first fifty with no way
+              to say so. Cursors only move forward, so Previous walks a stack. */}
+          {repo && (listState.hasNext || pages.length > 0) && (
+            <div className="flex items-center gap-2 px-2 py-1.5 border-t shrink-0 text-[10px]"
+              style={{ borderColor: "color-mix(in srgb, var(--border) 25%, transparent)", color: "var(--text3)" }}>
+              <button onClick={() => setPages((p) => p.slice(0, -1))} disabled={pages.length === 0 || listState.loading}
+                className="agx-btn px-2 py-0.5 rounded disabled:opacity-35"
+                style={{ border: "1px solid color-mix(in srgb, var(--border) 45%, transparent)", color: "var(--text2)" }}>‹ Previous</button>
+              <span className="tabular-nums">
+                Page {pages.length + 1}
+                {listState.total != null && listState.pageSize
+                  ? ` of ${Math.max(1, Math.ceil(listState.total / listState.pageSize))} · ${listState.total} total`
+                  : ""}
+              </span>
+              <button onClick={() => { if (listState.cursor) setPages((p) => [...p, listState.cursor!]); }}
+                disabled={!listState.hasNext || !listState.cursor || listState.loading}
+                className="agx-btn ml-auto px-2 py-0.5 rounded disabled:opacity-35"
+                style={{ border: "1px solid color-mix(in srgb, var(--border) 45%, transparent)", color: "var(--text2)" }}>Next ›</button>
+            </div>
+          )}
         </div>
 
         <SidebarGrip />
@@ -801,6 +1454,12 @@ export function PrView({ active, onOpenChatWith }: { active: boolean; onOpenChat
             </div>
           ) : (
             <>
+              <Masthead
+                d={d} busy={busy}
+                onEditTitle={doEditTitle} onDraft={() => act(d.isDraft ? "Mark ready" : "Convert to draft", () => api.prDraft(root, d.number, !d.isDraft))}
+                onClose={doClose} onLocalReview={doLocalReview}
+                onLabels={doLabels} onReviewers={doReviewers} onCopyLink={doCopyLink}
+              />
               <div className="flex border-b shrink-0 overflow-x-auto items-center" style={{ borderColor: "color-mix(in srgb, var(--border) 25%, transparent)" }}>
                 {TABS.map((t) => (
                   <button key={t.id} onClick={() => setTab(t.id)} className="text-[10.5px] px-3 py-1.5 whitespace-nowrap"
@@ -822,73 +1481,138 @@ export function PrView({ active, onOpenChatWith }: { active: boolean; onOpenChat
                 </div>
               </div>
 
+              {/* Prose on the left at a fixed reading width, metadata on the
+                  right — the arrangement GitHub uses, and the reason the body
+                  no longer hugs the left edge with the whole right half of the
+                  panel empty. Files/Checks/Commits keep the full width: a diff
+                  and a check list want every pixel. */}
               <div className="flex-1 overflow-y-auto min-h-0 agx-scroll p-3">
-                {tab === "overview" && (
-                  <Overview
-                    d={d} busy={busy} openThreads={openThreads.length}
-                    onLocalReview={doLocalReview} onMerge={doMerge} onClose={doClose}
-                    onUpdateBranch={() => act("Update branch", () => api.prUpdateBranch(root, d.number))}
-                    onRerun={() => act("Re-run checks", () => api.prRerun(root, d.number))}
-                    onAutoMerge={() => act("Auto-merge", () => api.prMerge(root, d.number, "squash", { auto: true, deleteBranch: true }))}
-                    onDraft={() => act(d.isDraft ? "Mark ready" : "Convert to draft", () => api.prDraft(root, d.number, !d.isDraft))}
-                    onGoThreads={() => setTab("conversation")}
-                  />
-                )}
-
-                {tab === "conversation" && (
-                  <Conversation
-                    d={d} lanes={lanes} raw={rawBots} onRaw={setRawBots} busy={busy}
-                    onResolve={(t) => act(t.isResolved ? "Unresolve" : "Resolve", () => api.prSetThreadResolved(root, t.id, !t.isResolved))}
-                    onReply={async (t) => {
-                      const first = t.comments[0];
-                      if (typeof first?.databaseId !== "number") return;
-                      const body = await askText({ title: `Reply on ${t.path}${t.line ? `:${t.line}` : ""}`, confirmLabel: "Reply", input: { label: "Reply" } });
-                      if (!body?.trim()) return;
-                      await act("Reply", () => api.prReply(root, d.number, first.databaseId as number, body));
-                    }}
-                  />
-                )}
+                {(tab === "overview" || tab === "conversation") ? (
+                  <div className="flex gap-4 items-start mx-auto" style={{ maxWidth: 1180 }}>
+                    <div className="min-w-0 flex-1">
+                      {tab === "overview" ? (
+                        <Overview
+                          d={d} busy={busy} openThreads={openThreads.length}
+                          conversationCount={d.comments.length + d.reviews.length + d.threads.length}
+                          onEditBody={doEditBody}
+                          onLocalReview={doLocalReview} onMerge={doMerge} onClose={doClose}
+                          onUpdateBranch={() => act("Update branch", () => api.prUpdateBranch(root, d.number))}
+                          onRerun={() => act("Re-run checks", () => api.prRerun(root, d.number))}
+                          onAutoMerge={() => act("Auto-merge", () => api.prMerge(root, d.number, "squash", { auto: true, deleteBranch: true }))}
+                          onCancelAutoMerge={() => act("Auto-merge cancelled", () => api.prMerge(root, d.number, "squash", { disableAuto: true }))}
+                          onDraft={() => act(d.isDraft ? "Mark ready" : "Convert to draft", () => api.prDraft(root, d.number, !d.isDraft))}
+                          onGoThreads={() => setTab("conversation")}
+                        />
+                      ) : (
+                        <Conversation
+                          d={d} lanes={lanes} raw={rawBots} onRaw={setRawBots} busy={busy} onComment={doComment}
+                          onResolve={(t) => act(t.isResolved ? "Unresolve" : "Resolve", () => api.prSetThreadResolved(root, t.id, !t.isResolved))}
+                          onReply={doReply}
+                          onApply={doApplySuggestion}
+                          onReact={doReact}
+                        />
+                      )}
+                    </div>
+                    <PrSidebar d={d} onLabels={doLabels} onReviewers={doReviewers} onAssignees={doAssignees} onMilestone={doMilestone} />
+                  </div>
+                ) : null}
 
                 {tab === "commits" && (
-                  <div className="text-[11px]">
-                    {d.commits.map((c) => (
-                      <div key={c.oid}>
-                        <button onClick={() => openCommit(selCommit === c.oid ? "" : c.oid)}
-                          className="w-full text-left flex items-center gap-2 py-1.5 border-b"
-                          style={{
-                            borderColor: "color-mix(in srgb, var(--border) 18%, transparent)",
-                            opacity: c.isMerge ? 0.55 : 1,
-                            background: selCommit === c.oid ? "color-mix(in srgb, var(--primary) 10%, transparent)" : "transparent",
-                          }}>
-                          <span className="shrink-0" style={{ color: "var(--text3)" }}>{selCommit === c.oid ? "▾" : "▸"}</span>
-                          <span className="tabular-nums shrink-0" style={{ ...CODE_FONT_STYLE, color: "var(--primary)" }}>{c.short}</span>
-                          <span className="truncate" style={{ color: "var(--text2)" }}>{c.message}</span>
-                          {c.isMerge && <Chip text="merge" tint="var(--text3)" title="Trunk catch-up, not work to review" />}
-                          <span className="ml-auto shrink-0 flex items-center gap-1.5 text-[10px]" style={{ color: "var(--text3)" }}>
-                            <Avatar login={c.author} size={14} />{c.author}
-                          </span>
-                        </button>
-                        {selCommit === c.oid && (
-                          <div className="my-2">
-                            {commitBusy ? <div className="text-[10.5px] p-2" style={{ color: "var(--text3)" }}>Loading the diff…</div>
-                              : commitFiles.length === 0 ? <div className="text-[10.5px] p-2" style={{ color: "var(--text3)" }}>This commit changed nothing textual</div>
-                              : <FileStack files={commitFiles} split={split} wrap={wrap} onSplit={setSplit} onWrap={setWrap} />}
-                          </div>
-                        )}
+                  <div className="text-[11px] flex flex-col gap-2">
+                    {groupCommitsByDay(d.commits).map(([day, list]) => (
+                      <div key={day}>
+                        {/* Grouped by the day they landed, as GitHub does — a
+                            long branch reads as a history rather than a list. */}
+                        <div className="text-[10px] uppercase tracking-wider mb-1 pl-1" style={{ color: "var(--text3)" }}>{day}</div>
+                        <div className="rounded-lg overflow-hidden" style={{ border: "1px solid color-mix(in srgb, var(--border) 24%, transparent)" }}>
+                          {list.map((c, i) => (
+                            <div key={c.oid} style={i ? { borderTop: "1px solid color-mix(in srgb, var(--border) 16%, transparent)" } : undefined}>
+                              <button onClick={() => openCommit(selCommit === c.oid ? "" : c.oid)}
+                                className="agx-btn w-full text-left flex items-center gap-2 px-2.5 py-2"
+                                style={{
+                                  opacity: c.isMerge ? 0.6 : 1,
+                                  background: selCommit === c.oid ? "color-mix(in srgb, var(--primary) 10%, transparent)" : "transparent",
+                                }}>
+                                <span className="shrink-0 text-[9px]" style={{ color: "var(--text3)" }}>{selCommit === c.oid ? "▾" : "▸"}</span>
+                                <span className="min-w-0 flex-1">
+                                  {/* Subject only, in full. The rest of the
+                                      message is behind the `…` button, exactly
+                                      as GitHub does it: a long body should not
+                                      push every other commit off the screen. */}
+                                  <span className="block" style={{ color: "var(--text)" }}>
+                                    {c.message}
+                                    {c.body?.trim() && (
+                                      <button
+                                        onClick={(ev) => { ev.stopPropagation(); toggleMsg(c.oid); }}
+                                        title={openMsgs.has(c.oid) ? "Hide the full message" : "Show the full commit message"}
+                                        aria-expanded={openMsgs.has(c.oid)}
+                                        className="agx-btn ml-1.5 align-middle text-[10px] px-1.5 rounded leading-none"
+                                        style={{ color: "var(--text3)", border: "1px solid color-mix(in srgb, var(--border) 55%, transparent)" }}>…</button>
+                                    )}
+                                  </span>
+                                  {c.body?.trim() && openMsgs.has(c.oid) && (
+                                    <span className="block mt-1.5 px-2 py-1.5 rounded text-[10.5px] whitespace-pre-wrap"
+                                      style={{ ...CODE_FONT_STYLE, color: "var(--text2)", background: "color-mix(in srgb, var(--border) 14%, transparent)" }}>{c.body.trim()}</span>
+                                  )}
+                                  <span className="flex items-center gap-1.5 mt-0.5 text-[10px]" style={{ color: "var(--text3)" }}>
+                                    {/* Everyone credited. A commit written with an
+                                        agent says so here, exactly like GitHub. */}
+                                    {(c.authors?.length ? c.authors : [c.author]).slice(0, 3).map((a) => (
+                                      <Avatar key={a} login={a} size={14} />
+                                    ))}
+                                    <span className="truncate">{commitAuthorLine(c)}</span>
+                                    {c.committedAt && <span>· {ago(c.committedAt)}</span>}
+                                  </span>
+                                </span>
+                                {c.isMerge && <Chip text="merge" tint="var(--text3)" title="Trunk catch-up, not work to review" />}
+                                {c.verified && <Chip text="verified" tint="var(--success)" title="Signature verified by GitHub" />}
+                                {c.checks && (
+                                  <span className="shrink-0 text-[11px]" title={`Checks on this commit: ${c.checks.toLowerCase()}`}
+                                    style={{ color: c.checks === "SUCCESS" ? "var(--success)" : c.checks === "FAILURE" || c.checks === "ERROR" ? "var(--error)" : "var(--warning)" }}>
+                                    {c.checks === "SUCCESS" ? "✓" : c.checks === "FAILURE" || c.checks === "ERROR" ? "✕" : "•"}
+                                  </span>
+                                )}
+                                <span className="tabular-nums shrink-0 px-1.5 py-0.5 rounded" style={{ ...CODE_FONT_STYLE, fontSize: "10px", color: "var(--primary)", background: "color-mix(in srgb, var(--primary) 12%, transparent)" }}>{c.short}</span>
+                              </button>
+                              {selCommit === c.oid && (
+                                <div className="my-2">
+                                  {commitBusy ? <div className="text-[10.5px] p-2" style={{ color: "var(--text3)" }}>Loading the diff…</div>
+                                    : commitFiles.length === 0 ? <div className="text-[10.5px] p-2" style={{ color: "var(--text3)" }}>This commit changed nothing textual</div>
+                                    : <FileStack files={commitFiles} split={split} wrap={wrap} onSplit={setSplit} onWrap={setWrap} />}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
                       </div>
                     ))}
+                    {d.truncated?.commits && (
+                      <div className="text-[10px] px-1" style={{ color: "var(--warning)" }}>
+                        Showing the most recent {d.truncated.commits} commits — GitHub caps a page at that.
+                      </div>
+                    )}
                   </div>
                 )}
 
                 {tab === "files" && (
                   <FilesTab
-                    d={d} byPath={byPath} loaded={!!diff} seenFiles={seenFiles} onSeen={toggleSeen}
+                    d={d} root={root} byPath={byPath} loaded={!!diff} seenFiles={seenFiles} onSeen={toggleSeen}
                     sel={selFile} onSel={setSelFile} split={split} wrap={wrap} onSplit={setSplit} onWrap={setWrap}
                     drafts={myDrafts} onAddDraft={addDraft}
+                    busy={busy} onReply={doReply}
+                    onApply={doApplySuggestion}
+                    onResolve={(t) => act(t.isResolved ? "Unresolve" : "Resolve", () => api.prSetThreadResolved(root, t.id, !t.isResolved))}
                   />
                 )}
 
-                {tab === "checks" && <Checks d={d} busy={busy} onRerun={() => act("Re-run checks", () => api.prRerun(root, d.number))} />}
+                {tab === "checks" && (
+                  <Checks
+                    d={d} root={root} jobs={jobs} busy={busy}
+                    onRerun={() => act("Re-run checks", () => api.prRerun(root, d.number))}
+                    onRerunJobs={(what, id) => act("Re-run", () => api.prRerunJobs(root, what, id))}
+                    onAsk={onOpenChatWith ? (k) => askClaudeAboutCheck(k) : undefined}
+                  />
+                )}
 
                 {tab === "review" && canReview && (
                   <ReviewTab
@@ -904,12 +1628,21 @@ export function PrView({ active, onOpenChatWith }: { active: boolean; onOpenChat
       </div>
       {dialog}
     </div>
+    </MentionCtx.Provider>
+    </RepoCtx.Provider>
   );
 }
 
 // ---------------------------------------------------------------------------
 // overview
 // ---------------------------------------------------------------------------
+
+export type MergeMethod = "squash" | "merge" | "rebase";
+const MERGE_LABEL: Record<MergeMethod, string> = {
+  squash: "Squash & merge",
+  merge: "Merge commit",
+  rebase: "Rebase & merge",
+};
 
 const MERGE_WHY: Record<string, string> = {
   BLOCKED: "A required review or check has not passed",
@@ -921,37 +1654,55 @@ const MERGE_WHY: Record<string, string> = {
   UNKNOWN: "GitHub has not finished working it out",
 };
 
-function Overview({ d, busy, openThreads, onLocalReview, onMerge, onClose, onUpdateBranch, onRerun, onAutoMerge, onDraft, onGoThreads }: {
-  d: PrDetail; busy: boolean; openThreads: number;
-  onLocalReview: () => void; onMerge: () => void; onClose: () => void; onUpdateBranch: () => void;
-  onRerun: () => void; onAutoMerge: () => void; onDraft: () => void; onGoThreads: () => void;
+function Overview({ d, busy, openThreads, conversationCount, onLocalReview, onMerge, onClose, onUpdateBranch, onRerun, onAutoMerge, onCancelAutoMerge, onDraft, onGoThreads, onEditBody }: {
+  d: PrDetail; busy: boolean; openThreads: number; conversationCount: number;
+  onLocalReview: () => void; onMerge: (method: MergeMethod) => void; onClose: () => void; onUpdateBranch: () => void;
+  onRerun: () => void; onAutoMerge: () => void; onCancelAutoMerge: () => void; onDraft: () => void; onGoThreads: () => void;
+  onEditBody: (body: string) => Promise<boolean>;
 }) {
   const c = d.checks;
+  const [mergeMethod, setMergeMethod] = useState<MergeMethod>("squash");
   const canMerge = d.mergeState === "CLEAN";
 
   return (
     <div className="flex flex-col gap-3">
-      <div>
-        <div className="text-[14px] leading-snug" style={{ color: "var(--text)" }}>{d.title}</div>
-        <div className="text-[10.5px] mt-1 flex items-center gap-1.5 flex-wrap" style={{ color: "var(--text3)" }}>
-          <Avatar login={d.author} size={15} />
-          <span>#{d.number} · {d.author} · {d.headRefName} → {d.baseRefName} ·</span>
-          <span style={{ color: "var(--success)" }}>+{d.additions}</span>
-          <span style={{ color: "var(--error)" }}>−{d.deletions}</span>
-          <span>· {d.changedFiles} files</span>
-        </div>
-        {d.labels.length > 0 && (
-          <div className="flex gap-1 flex-wrap mt-1.5">{d.labels.map((l) => <Chip key={l.name} text={l.name} tint="var(--primary)" />)}</div>
-        )}
-      </div>
-
       {d.forcePushedSinceReview && (
         <div className="text-[10.5px] px-2.5 py-2 rounded" style={{ color: "var(--warning)", background: "color-mix(in srgb, var(--warning) 10%, transparent)" }}>
           The author force-pushed after the last review — that review was for code that is no longer here.
         </div>
       )}
 
-      {/* merge, and why not */}
+      {/* Merged and closed pull requests are history: there is nothing to merge,
+          no branch to update, and no draft to go back to. Offering those buttons
+          was not just clutter, it was a lie — "Merging is blocked, GitHub has
+          not finished working it out" on a pull request that merged an hour ago.
+          What is left is what GitHub leaves: what happened, and reopen. */}
+      {d.state !== "OPEN" ? (
+        <section className="rounded-lg overflow-hidden" style={{ border: "1px solid color-mix(in srgb, var(--border) 30%, transparent)" }}>
+          <div className="flex gap-2.5 items-start p-3">
+            <span className="shrink-0 rounded-full flex items-center justify-center text-[13px]"
+              style={{ width: 26, height: 26, background: d.state === "MERGED" ? "var(--primary)" : "color-mix(in srgb, var(--text3) 60%, transparent)", color: "var(--bg)" }}>
+              {d.state === "MERGED" ? "⏣" : "⊘"}
+            </span>
+            <span className="min-w-0">
+              <span className="block text-[13px] font-semibold leading-tight" style={{ color: "var(--text)" }}>
+                {d.state === "MERGED" ? "Merged" : "Closed without merging"}
+              </span>
+              <span className="block text-[11px] mt-0.5" style={{ color: "var(--text3)" }}>
+                {d.state === "MERGED"
+                  ? `${d.mergedBy ? `${d.mergedBy} merged ` : "Merged "}into ${d.baseRefName}${d.mergedAt ? ` ${ago(d.mergedAt)}` : ""}`
+                  : `This branch was never merged into ${d.baseRefName}${d.closedAt ? ` · closed ${ago(d.closedAt)}` : ""}`}
+              </span>
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5 flex-wrap px-3 py-2.5"
+            style={{ borderTop: "1px solid color-mix(in srgb, var(--border) 25%, transparent)", background: "color-mix(in srgb, var(--border) 12%, transparent)" }}>
+            {d.state === "CLOSED" && <Btn onClick={onClose} disabled={busy} title="Put it back to open, with its comments and reviews intact">↺ Reopen</Btn>}
+            <a href={externalUrl(d.url)} target="_blank" rel="noreferrer noopener" className="text-[10.5px] px-2.5 py-1 rounded"
+              style={{ color: "var(--text2)", border: "1px solid color-mix(in srgb, var(--border) 50%, transparent)" }}>Open on GitHub ↗</a>
+          </div>
+        </section>
+      ) : (
       <section className="rounded-lg overflow-hidden" style={{ border: "1px solid color-mix(in srgb, var(--border) 38%, transparent)" }}>
         <div className="flex gap-2.5 items-start p-3">
           <span className="shrink-0 rounded-full flex items-center justify-center text-[13px]"
@@ -987,8 +1738,35 @@ function Overview({ d, busy, openThreads, onLocalReview, onMerge, onClose, onUpd
 
         <div className="flex items-center gap-1.5 flex-wrap px-3 py-2.5"
           style={{ borderTop: "1px solid color-mix(in srgb, var(--border) 25%, transparent)", background: "color-mix(in srgb, var(--border) 12%, transparent)" }}>
-          <Btn onClick={onMerge} disabled={busy || !canMerge} primary title={canMerge ? "Squash, merge and delete the branch" : MERGE_WHY[d.mergeState]}>Squash &amp; merge</Btn>
-          <Btn onClick={onAutoMerge} disabled={busy} title="Merge automatically once everything passes">Merge when green</Btn>
+          {/* All three methods GitHub offers, not just squash. Which one a repo
+              wants is a real decision — a release branch is merged, a tidy
+              feature is squashed — and hard-coding squash made the other two
+              unreachable even though the server supported them all along. */}
+          <span className="flex items-center rounded overflow-hidden shrink-0" style={{ border: "1px solid var(--primary)" }}>
+            <button onClick={() => onMerge(mergeMethod)} disabled={busy || !canMerge}
+              title={canMerge ? `${MERGE_LABEL[mergeMethod]} and delete the branch` : MERGE_WHY[d.mergeState]}
+              className="agx-btn text-[10.5px] px-2.5 py-1 disabled:opacity-40"
+              style={{ background: "var(--primary)", color: "var(--bg)", fontWeight: 500 }}>
+              {MERGE_LABEL[mergeMethod]}
+            </button>
+            <Select
+              value={mergeMethod}
+              onChange={(v: string) => setMergeMethod(v as MergeMethod)}
+              options={[
+                { value: "squash", label: "Squash and merge", hint: "one commit" },
+                { value: "merge", label: "Create a merge commit", hint: "keeps every commit" },
+                { value: "rebase", label: "Rebase and merge", hint: "no merge commit" },
+              ]}
+              title="Merge method"
+              align="right"
+              className="text-[10.5px] px-1.5 py-1 outline-none"
+              style={{ background: "var(--primary)", color: "var(--bg)", borderLeft: "1px solid color-mix(in srgb, var(--bg) 35%, transparent)" }}
+              placeholder=""
+            />
+          </span>
+          {d.autoMerge
+            ? <Btn onClick={onCancelAutoMerge} disabled={busy} warn title={`Armed by ${d.autoMerge.enabledBy}`}>Cancel auto-merge</Btn>
+            : <Btn onClick={onAutoMerge} disabled={busy} title="Merge automatically once everything passes">Merge when green</Btn>}
           <Btn onClick={onUpdateBranch} disabled={busy} warn title="Merge the base branch into this one — this updates the branch on GitHub">↻ Update branch</Btn>
           {c.failure > 0 && <Btn onClick={onRerun} disabled={busy}>Re-run failed</Btn>}
           <span className="ml-auto flex gap-1.5">
@@ -997,16 +1775,355 @@ function Overview({ d, busy, openThreads, onLocalReview, onMerge, onClose, onUpd
           </span>
         </div>
       </section>
+      )}
 
-      <section>
-        <div className="text-[9.5px] uppercase tracking-wider mb-2" style={{ color: "var(--text3)" }}>description</div>
-        {d.body.trim() ? <Md body={d.body} /> : <div className="text-[11px]" style={{ color: "var(--text3)" }}>No description.</div>}
-      </section>
+      <Description d={d} busy={busy} onSave={onEditBody} />
 
-      <div className="flex gap-1.5 flex-wrap">
-        <Btn onClick={onLocalReview} disabled={busy} primary title="Check the PR out into a throwaway worktree and review it with the whole repo in context">Review locally with Claude</Btn>
-        <a href={d.url} target="_blank" rel="noreferrer noopener" className="text-[10.5px] px-2.5 py-1 rounded"
+      <div className="flex gap-1.5 flex-wrap items-center">
+        <Btn onClick={onLocalReview} disabled={busy} primary title="Open a chat with the review prompt ready. Reads only: no checkout, nothing written to this repository">Review with Claude</Btn>
+        <a href={externalUrl(d.url)} target="_blank" rel="noreferrer noopener" className="text-[10.5px] px-2.5 py-1 rounded"
           style={{ color: "var(--text2)", border: "1px solid color-mix(in srgb, var(--border) 50%, transparent)" }}>Open on GitHub ↗</a>
+      </div>
+
+      {/* Where to go next. Overview answers "can this land"; the conversation is
+          usually the reason it cannot, and it should not need finding. */}
+      <button onClick={onGoThreads}
+        className="flex items-center gap-3 rounded-lg px-3 py-2.5 text-left agx-btn"
+        style={{ border: "1px solid color-mix(in srgb, var(--primary) 32%, transparent)", background: "color-mix(in srgb, var(--primary) 7%, transparent)" }}>
+        <span className="min-w-0">
+          <span className="block text-[9px] uppercase tracking-[.13em]" style={{ color: "var(--text3)" }}>Next</span>
+          <span className="block text-[12.5px]" style={{ color: "var(--text)" }}>Conversation</span>
+        </span>
+        <span className="ml-auto text-[10.5px] shrink-0" style={{ color: "var(--primary)" }}>
+          {conversationCount === 0 ? "Nothing said yet" : `${conversationCount} comment${conversationCount === 1 ? "" : "s"} and thread${conversationCount === 1 ? "" : "s"}`} →
+        </span>
+      </button>
+    </div>
+  );
+}
+
+/**
+ * The description, and a way to fix it without leaving.
+ *
+ * Write/Preview rather than a bare textarea: a description is markdown, and
+ * finding out how it renders by saving it and looking is not a review flow.
+ */
+function Description({ d, busy, onSave }: { d: PrDetail; busy: boolean; onSave: (body: string) => Promise<boolean> }) {
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState(d.body);
+  const [preview, setPreview] = useState(false);
+  const [saving, setSaving] = useState(false);
+  // A new pull request means a new body; without this the editor keeps the
+  // previous one and offers to save it over the one you are looking at.
+  useEffect(() => { setEditing(false); setPreview(false); setText(d.body); }, [d.number, d.body]);
+
+  const done = d.checklist.filter((i) => i.checked).length;
+
+  const save = async () => {
+    if (text === d.body) { setEditing(false); return; }
+    setSaving(true);
+    const ok = await onSave(text);
+    setSaving(false);
+    if (ok) setEditing(false);
+  };
+
+  if (editing) {
+    return (
+      <section className="rounded-lg overflow-hidden" style={{ border: "1px solid color-mix(in srgb, var(--border) 38%, transparent)" }}>
+        <div className="flex items-center gap-1 px-2 py-1.5" style={{ borderBottom: "1px solid color-mix(in srgb, var(--border) 25%, transparent)" }}>
+          <Btn onClick={() => setPreview(false)} small primary={!preview}>Write</Btn>
+          <Btn onClick={() => setPreview(true)} small primary={preview}>Preview</Btn>
+        </div>
+        {preview ? (
+          <div className="p-3 min-h-[160px]">{text.trim() ? <Md body={text} /> : <span className="text-[11px]" style={{ color: "var(--text3)" }}>Nothing to preview.</span>}</div>
+        ) : (
+          <textarea
+            value={text} onChange={(e) => setText(e.target.value)} autoFocus
+            onKeyDown={(e) => {
+              if (e.key === "Escape") { setText(d.body); setEditing(false); }
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void save(); }
+            }}
+            className="w-full p-3 text-[12px] outline-none resize-y agx-scroll"
+            style={{ ...CODE_FONT_STYLE, minHeight: 160, background: "transparent", color: "var(--text2)", lineHeight: 1.6 }}
+          />
+        )}
+        <div className="flex items-center gap-1.5 px-2.5 py-2"
+          style={{ borderTop: "1px solid color-mix(in srgb, var(--border) 25%, transparent)", background: "color-mix(in srgb, var(--border) 12%, transparent)" }}>
+          <span className="text-[10px]" style={{ color: "var(--text3)" }}>Markdown · ⌘↵ save · Esc cancel</span>
+          <span className="ml-auto flex gap-1.5">
+            <Btn onClick={() => { setText(d.body); setEditing(false); }} disabled={saving} small>Cancel</Btn>
+            <Btn onClick={save} disabled={saving || busy} primary small>{saving ? "Saving…" : "Save"}</Btn>
+          </span>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="rounded-lg overflow-hidden" style={{ border: "1px solid color-mix(in srgb, var(--border) 38%, transparent)" }}>
+      <div className="flex items-center gap-2 px-3 py-1.5"
+        style={{ borderBottom: "1px solid color-mix(in srgb, var(--border) 25%, transparent)", background: "color-mix(in srgb, var(--border) 12%, transparent)" }}>
+        <span className="text-[9.5px] uppercase tracking-wider" style={{ color: "var(--text3)" }}>description</span>
+        <span className="ml-auto"><Btn onClick={() => setEditing(true)} disabled={busy} small>✎ Edit</Btn></span>
+      </div>
+      <div className="p-3">
+        {d.checklist.length > 0 && (
+          <div className="flex items-center gap-2 mb-3 text-[10.5px]" style={{ color: done === d.checklist.length ? "var(--success)" : "var(--text3)" }}>
+            <span className="tabular-nums shrink-0">{done} of {d.checklist.length} done</span>
+            <span className="flex-1 h-1 rounded-full overflow-hidden" style={{ background: "color-mix(in srgb, var(--border) 40%, transparent)" }}>
+              <span className="block h-full rounded-full" style={{ width: `${(done / d.checklist.length) * 100}%`, background: done === d.checklist.length ? "var(--success)" : "var(--primary)" }} />
+            </span>
+          </div>
+        )}
+        {d.body.trim() ? <Md body={d.body} /> : <div className="text-[11px]" style={{ color: "var(--text3)" }}>No description.</div>}
+      </div>
+    </section>
+  );
+}
+
+/**
+ * A dropdown that closes on an outside click, on Escape, and on choosing
+ * something. All three, because a menu that only closes one of those ways is
+ * the kind of thing you only notice when it is stuck open over the diff.
+ */
+function Menu({ label, title, children, align = "right" }: {
+  label: string; title?: string; children: (close: () => void) => React.ReactNode; align?: "left" | "right";
+}) {
+  const [open, setOpen] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const away = (e: MouseEvent) => { if (!box.current?.contains(e.target as Node)) setOpen(false); };
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", away);
+    document.addEventListener("keydown", esc);
+    return () => { document.removeEventListener("mousedown", away); document.removeEventListener("keydown", esc); };
+  }, [open]);
+  return (
+    <div className="relative shrink-0" ref={box}>
+      <Btn onClick={() => setOpen((v) => !v)} title={title} small>{label}</Btn>
+      {open && (
+        <div className="absolute z-50 mt-1.5 rounded-lg overflow-hidden agx-menu" style={{ [align]: 0, minWidth: 216 }}>
+          {children(() => setOpen(false))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MenuItem({ children, onClick, danger, kbd }: {
+  children: React.ReactNode; onClick: () => void; danger?: boolean; kbd?: string;
+}) {
+  return (
+    <button onClick={onClick} className="agx-mi w-full text-left flex items-center gap-2 px-3 py-1.5 text-[11px]"
+      style={{ color: danger ? "var(--error)" : "var(--text2)" }}>
+      <span className="min-w-0 truncate">{children}</span>
+      {kbd && <span className="ml-auto text-[9.5px] shrink-0" style={{ color: "var(--text3)" }}>{kbd}</span>}
+    </button>
+  );
+}
+
+const MenuSep = () => <div style={{ height: 1, background: "color-mix(in srgb, var(--border) 26%, transparent)", margin: "3px 0" }} />;
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="min-w-0" style={{ maxWidth: 260 }}>
+      <div className="text-[9px] uppercase tracking-[.12em] mb-1" style={{ color: "var(--text3)" }}>{label}</div>
+      <div className="text-[11px] flex items-center gap-1.5 flex-wrap" style={{ color: "var(--text2)" }}>{children}</div>
+    </div>
+  );
+}
+
+/**
+ * The identity of the pull request, above the tabs so it survives every tab.
+ *
+ * Everything here used to live at the top of Overview, which meant that the
+ * moment you opened Files you no longer knew whose pull request you were
+ * reading or what branch it targeted.
+ */
+/**
+ * The right-hand column, as GitHub has it.
+ *
+ * Two things at once. It carries the metadata that had nowhere to live —
+ * reviewers, assignees, labels, milestone, the issues this closes, who is
+ * taking part — and it occupies the space to the right of the prose, which is
+ * the reason the reading column can be a fixed, comfortable width instead of
+ * stretching to the window and leaving half the panel empty.
+ */
+function SidebarSection({ title, onEdit, children }: { title: string; onEdit?: () => void; children: React.ReactNode }) {
+  return (
+    <div className="py-2.5" style={{ borderBottom: "1px solid color-mix(in srgb, var(--border) 20%, transparent)" }}>
+      <div className="flex items-center gap-2 mb-1.5">
+        <span className="text-[9.5px] uppercase tracking-wider" style={{ color: "var(--text3)" }}>{title}</span>
+        {onEdit && (
+          <button onClick={onEdit} title={`Edit ${title.toLowerCase()}`} aria-label={`Edit ${title.toLowerCase()}`}
+            className="agx-btn ml-auto text-[10px] px-1 rounded hover:bg-white/5" style={{ color: "var(--text3)" }}>✎</button>
+        )}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function SidebarPeople({ logins, empty }: { logins: string[]; empty: string }) {
+  if (!logins.length) return <span className="text-[10.5px]" style={{ color: "var(--text3)" }}>{empty}</span>;
+  return (
+    <div className="flex flex-col gap-1">
+      {logins.map((l) => (
+        <span key={l} className="flex items-center gap-1.5 text-[11px]" style={{ color: "var(--text2)" }}>
+          <Avatar login={l} size={16} />{l}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function PrSidebar({ d, onLabels, onReviewers, onAssignees, onMilestone }: {
+  d: PrDetail;
+  onLabels: () => void; onReviewers: () => void; onAssignees: () => void; onMilestone: () => void;
+}) {
+  return (
+    <aside className="shrink-0 w-[210px] pl-4 hidden lg:block" style={{ borderLeft: "1px solid color-mix(in srgb, var(--border) 20%, transparent)" }}>
+      <SidebarSection title="Reviewers" onEdit={onReviewers}>
+        <SidebarPeople logins={d.reviewers} empty="No reviewers" />
+      </SidebarSection>
+      <SidebarSection title="Assignees" onEdit={onAssignees}>
+        <SidebarPeople logins={d.assignees} empty="No one assigned" />
+      </SidebarSection>
+      <SidebarSection title="Labels" onEdit={onLabels}>
+        {d.labels.length
+          ? <div className="flex flex-wrap gap-1">{d.labels.map((l) => <Chip key={l.name} text={l.name} tint={l.color ? `#${l.color}` : "var(--primary)"} />)}</div>
+          : <span className="text-[10.5px]" style={{ color: "var(--text3)" }}>None yet</span>}
+      </SidebarSection>
+      <SidebarSection title="Milestone" onEdit={onMilestone}>
+        <span className="text-[11px]" style={{ color: d.milestone ? "var(--text2)" : "var(--text3)" }}>{d.milestone || "No milestone"}</span>
+      </SidebarSection>
+      {d.linkedIssues.length > 0 && (
+        <SidebarSection title="Development">
+          <div className="flex flex-col gap-1">
+            <span className="text-[10px]" style={{ color: "var(--text3)" }}>Merging this closes:</span>
+            {d.linkedIssues.map((i) => (
+              <a key={i.number} href={externalUrl(i.url)} target="_blank" rel="noreferrer noopener"
+                className="text-[11px] truncate" style={{ color: "var(--primary)" }} title={i.title}>#{i.number} {i.title}</a>
+            ))}
+          </div>
+        </SidebarSection>
+      )}
+      {d.participants.length > 0 && (
+        <SidebarSection title={`${d.participants.length} participant${d.participants.length === 1 ? "" : "s"}`}>
+          <div className="flex flex-wrap gap-1">
+            {d.participants.map((p) => <span key={p} title={p}><Avatar login={p} size={20} /></span>)}
+          </div>
+        </SidebarSection>
+      )}
+      {d.autoMerge && (
+        <SidebarSection title="Auto-merge">
+          <span className="text-[10.5px]" style={{ color: "var(--warning)" }}>
+            Armed by {d.autoMerge.enabledBy} ({d.autoMerge.method.toLowerCase()})
+          </span>
+        </SidebarSection>
+      )}
+    </aside>
+  );
+}
+
+/**
+ * How a pull request's own state looks: colour, word and glyph.
+ *
+ * Merged is purple, closed is grey, draft is grey, open is green — GitHub's
+ * palette, because everyone already reads it. A closed pull request wearing the
+ * green of a passing build (which is what tinting by check verdict did) says
+ * exactly the wrong thing.
+ */
+function prStateBadge(d: { state: PrSummary["state"]; isDraft: boolean }): { tint: string; state: string; glyph: string } {
+  if (d.state === "MERGED") return { tint: "var(--primary)", state: "Merged", glyph: "⏣" };
+  if (d.state === "CLOSED") return { tint: "var(--text3)", state: "Closed", glyph: "⊘" };
+  if (d.isDraft) return { tint: "var(--text3)", state: "Draft", glyph: "◌" };
+  return { tint: "var(--success)", state: "Open", glyph: "◉" };
+}
+
+function Masthead({ d, busy, onEditTitle, onDraft, onClose, onLocalReview, onLabels, onReviewers, onCopyLink }: {
+  d: PrDetail; busy: boolean;
+  onEditTitle: () => void; onDraft: () => void; onClose: () => void; onLocalReview: () => void;
+  onLabels: () => void; onReviewers: () => void; onCopyLink: () => void;
+}) {
+  // The PR's own state, which is not the same thing as its check verdict —
+  // colouring a merged pull request by whether CI went green says nothing about
+  // it being merged. GitHub's palette: open green, merged purple, closed grey,
+  // draft grey; each with its own glyph so the state reads without the word.
+  const { tint, state, glyph } = prStateBadge(d);
+  return (
+    <div className="px-3 pt-2.5 pb-2 shrink-0" style={{ borderBottom: "1px solid color-mix(in srgb, var(--border) 25%, transparent)" }}>
+      <div className="flex items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <span className="text-[9.5px] px-1.5 py-0.5 rounded-full align-middle inline-flex items-center gap-1"
+            style={{ color: tint, border: `1px solid color-mix(in srgb, ${tint} 45%, transparent)`, background: `color-mix(in srgb, ${tint} 12%, transparent)` }}>
+            <span aria-hidden>{glyph}</span>{state}
+          </span>
+          <span className="text-[14px] leading-snug ml-2" style={{ color: "var(--text)" }}>
+            <span className="tabular-nums mr-1.5" style={{ color: "var(--text3)" }}>#{d.number}</span>{d.title}
+          </span>
+        </div>
+        <Menu label="⋯" title="More actions">
+          {(close) => (
+            <>
+              <MenuItem onClick={() => { close(); onEditTitle(); }}>✎ Edit title</MenuItem>
+              {/* Requesting a review or flipping the draft flag are things you do
+                  to a pull request that is still going. On a merged one GitHub
+                  does not offer them either. */}
+              {d.state === "OPEN" && <>
+                <MenuItem onClick={() => { close(); onReviewers(); }}>◍ Request a review</MenuItem>
+                <MenuItem onClick={() => { close(); onDraft(); }}>◌ {d.isDraft ? "Mark ready for review" : "Convert to draft"}</MenuItem>
+              </>}
+              <MenuItem onClick={() => { close(); onLabels(); }}>⌗ Edit labels</MenuItem>
+              <MenuSep />
+              <MenuItem onClick={() => { close(); onCopyLink(); }}>🔗 Copy link</MenuItem>
+              <MenuItem onClick={() => { close(); openExternal(d.url); }}>↗ Open on GitHub</MenuItem>
+              <MenuItem onClick={() => { close(); onLocalReview(); }}>✦ Review with Claude</MenuItem>
+              {d.state !== "MERGED" && <>
+                <MenuSep />
+                <MenuItem onClick={() => { close(); onClose(); }} danger={d.state !== "CLOSED"}>
+                  {d.state === "CLOSED" ? "↺ Reopen pull request" : "✕ Close pull request"}
+                </MenuItem>
+              </>}
+            </>
+          )}
+        </Menu>
+      </div>
+
+      {/* Packed left and wrapping, not stretched to fill: six fields spread
+          across a wide pane put Milestone a screen away from Author, and the
+          eye has to travel the whole width to read one header. */}
+      <div className="flex flex-wrap gap-x-7 gap-y-2 mt-2.5">
+        <Field label="Author"><Avatar login={d.author} size={15} />{d.author}</Field>
+        <Field label="Branch">
+          <code className="px-1 py-0.5 rounded text-[10.5px] truncate" style={{ ...CODE_FONT_STYLE, color: "var(--primary)", background: "color-mix(in srgb, var(--primary) 12%, transparent)" }}>{d.headRefName}</code>
+          <span style={{ color: "var(--text3)" }}>→ {d.baseRefName}</span>
+        </Field>
+        <Field label="Changes">
+          <span className="tabular-nums" style={{ color: "var(--success)" }}>+{d.additions}</span>
+          <span className="tabular-nums" style={{ color: "var(--error)" }}>−{d.deletions}</span>
+          <span style={{ color: "var(--text3)" }}>· {d.changedFiles} file{d.changedFiles === 1 ? "" : "s"}</span>
+        </Field>
+        <Field label="Reviewers">
+          {d.reviewers.length === 0
+            ? <span style={{ color: "var(--text3)" }}>nobody yet</span>
+            : d.reviewers.map((r) => <span key={r} className="flex items-center gap-1"><Avatar login={r} size={14} />{r}</span>)}
+          <button onClick={onReviewers} disabled={busy} title="Request a review" className="agx-inline-add">＋</button>
+        </Field>
+        <Field label="Assignee">
+          {d.assignees.length === 0
+            ? <span style={{ color: "var(--text3)" }}>unassigned</span>
+            : d.assignees.map((a) => <span key={a} className="flex items-center gap-1"><Avatar login={a} size={14} />{a}</span>)}
+        </Field>
+        <Field label="Milestone">
+          {d.milestone ? <span className="truncate">{d.milestone}</span> : <span style={{ color: "var(--text3)" }}>none</span>}
+        </Field>
+      </div>
+
+      <div className="flex gap-1 flex-wrap mt-2.5 items-center">
+        {d.labels.map((l) => <Chip key={l.name} text={l.name} tint={l.color ? `#${l.color}` : "var(--primary)"} />)}
+        <button onClick={onLabels} disabled={busy} className="agx-inline-add" style={{ borderStyle: "dashed" }}>＋ Label</button>
       </div>
     </div>
   );
@@ -1066,39 +2183,227 @@ function FileStack({ files, split, wrap, onSplit, onWrap }: {
   );
 }
 
-function FilesTab({ d, byPath, loaded, seenFiles, onSeen, sel, onSel, split, wrap, onSplit, onWrap, drafts, onAddDraft }: {
-  d: PrDetail; byPath: Map<string, FileChange>; loaded: boolean;
+/**
+ * Renders its children only once they have come near the viewport.
+ *
+ * Every file on this tab is open by default, which is the right default for
+ * reading a change — but mounting sixty syntax-highlighted diffs at once is not
+ * a tab you can scroll. This keeps the default and pays for each diff at the
+ * moment it is about to be looked at; `once` means scrolling back up does not
+ * unmount what you already read.
+ */
+function LazyMount({ minHeight, children }: { minHeight: number; children: React.ReactNode }) {
+  const [shown, setShown] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (shown) return;
+    const el = box.current;
+    if (!el) return;
+    if (typeof IntersectionObserver !== "function") { setShown(true); return; }
+    const io = new IntersectionObserver((es) => { if (es.some((e) => e.isIntersecting)) { setShown(true); io.disconnect(); } }, { rootMargin: "600px 0px" });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [shown]);
+  return <div ref={box} style={shown ? undefined : { minHeight }}>{shown ? children : null}</div>;
+}
+
+/** Above this many changed lines a file starts folded. A 4,000-line lockfile is
+ *  not something anybody reads, and it should not be what the tab opens on. */
+const BIG_FILE_LINES = 600;
+
+/** A directory node in the changed-files tree. */
+type TreeNode = { name: string; path: string; dirs: Map<string, TreeNode>; files: PrFile[] };
+
+/** Group changed paths into directories, then collapse the runs of single-child
+ *  directories the way GitHub does (`web/src/lib` on one row, not three). */
+function buildFileTree(files: PrFile[]): TreeNode {
+  const root: TreeNode = { name: "", path: "", dirs: new Map(), files: [] };
+  for (const f of files) {
+    const parts = f.path.split("/");
+    let node = root;
+    for (const dir of parts.slice(0, -1)) {
+      let next = node.dirs.get(dir);
+      if (!next) { next = { name: dir, path: node.path ? `${node.path}/${dir}` : dir, dirs: new Map(), files: [] }; node.dirs.set(dir, next); }
+      node = next;
+    }
+    node.files.push(f);
+  }
+  const squash = (n: TreeNode): TreeNode => {
+    let cur = n;
+    while (cur.files.length === 0 && cur.dirs.size === 1) {
+      const only = [...cur.dirs.values()][0]!;
+      cur = { ...only, name: `${cur.name}/${only.name}`.replace(/^\//, "") };
+    }
+    return { ...cur, dirs: new Map([...cur.dirs].map(([k, v]) => [k, squash(v)])) };
+  };
+  return { ...root, dirs: new Map([...root.dirs].map(([k, v]) => [k, squash(v)])) };
+}
+
+function FileTree({ node, sel, onPick, seen, drafts, depth = 0 }: {
+  node: TreeNode; sel: string | null; onPick: (p: string) => void;
+  seen: (p: string) => boolean; drafts: (p: string) => number; depth?: number;
+}) {
+  return (
+    <>
+      {[...node.dirs.values()].map((dir) => (
+        <div key={dir.path}>
+          <div className="truncate text-[10px] px-1 py-0.5" style={{ paddingLeft: 6 + depth * 10, color: "var(--text3)" }} title={dir.path}>
+            {dir.name}
+          </div>
+          <FileTree node={dir} sel={sel} onPick={onPick} seen={seen} drafts={drafts} depth={depth + 1} />
+        </div>
+      ))}
+      {node.files.map((f) => {
+        const base = f.path.split("/").pop() ?? f.path;
+        const on = sel === f.path;
+        const n = drafts(f.path);
+        return (
+          <button key={f.path} onClick={() => onPick(f.path)} title={f.path}
+            className="agx-btn w-full text-left flex items-center gap-1 py-0.5 rounded truncate hover:bg-white/5"
+            style={{
+              paddingLeft: 6 + depth * 10, paddingRight: 4,
+              background: on ? "color-mix(in srgb, var(--primary) 16%, transparent)" : undefined,
+              color: seen(f.path) ? "var(--text3)" : "var(--text2)",
+            }}>
+            <span className="truncate text-[10.5px]">{base}</span>
+            {n > 0 && <span className="ml-auto text-[9px] shrink-0" style={{ color: "var(--warning)" }}>{n}</span>}
+            {f.comments > 0 && <span className="ml-auto text-[9px] shrink-0" style={{ color: "var(--primary)" }}>{f.comments}</span>}
+            {seen(f.path) && <span className="ml-auto text-[9px] shrink-0" style={{ color: "var(--success)" }}>✓</span>}
+          </button>
+        );
+      })}
+    </>
+  );
+}
+
+function FilesTab({ d, root, byPath, loaded, seenFiles, onSeen, sel, onSel, split, wrap, onSplit, onWrap, drafts, onAddDraft, onResolve, onReply, onApply, busy }: {
+  d: PrDetail; root: string; byPath: Map<string, FileChange>; loaded: boolean;
   seenFiles: string[]; onSeen: (p: string) => void;
   sel: string | null; onSel: (p: string | null) => void;
   split: boolean; wrap: boolean; onSplit: (v: boolean) => void; onWrap: (v: boolean) => void;
-  drafts: DraftComment[]; onAddDraft: (path: string, line: number) => void;
+  drafts: DraftComment[]; onAddDraft: (path: string, line: number, startLine?: number, side?: "LEFT" | "RIGHT") => void;
+  onResolve: (t: PrThread) => void; onReply: (t: PrThread) => void;
+  onApply?: (t: PrThread, text: string) => void; busy: boolean;
 }) {
-  const current = sel ? byPath.get(sel) : undefined;
   const draftsFor = (p: string) => drafts.filter((x) => x.path === p).length;
+  /**
+   * The line, or range of lines, a comment is being written about.
+   *
+   * A plain click starts at that line; shift-click extends from it, which is
+   * GitHub's gesture for "this whole block". Kept here rather than in the diff
+   * component so the highlight survives a re-render of the file and so only one
+   * file can be mid-selection at a time.
+   */
+  const [selRange, setSelRange] = useState<{ path: string; sel: LineSel } | null>(null);
+  const pickLine = (path: string, pk: LinePick) => {
+    const cur = selRange?.path === path ? selRange.sel : null;
+    if (pk.shift && cur && cur.side === pk.side) {
+      const sel = { start: cur.start, end: pk.line, side: pk.side };
+      setSelRange({ path, sel });
+      onAddDraft(path, Math.max(sel.start, sel.end), Math.min(sel.start, sel.end), pk.side);
+      setSelRange(null);
+      return;
+    }
+    // A single line: offer it straight away, and remember it so a following
+    // shift-click can stretch the range instead of starting over.
+    setSelRange({ path, sel: { start: pk.line, end: pk.line, side: pk.side } });
+    onAddDraft(path, pk.line, undefined, pk.side);
+    setSelRange(null);
+  };
+  /** Unresolved first: a resolved thread is history, an open one is a question. */
+  const threadsFor = (p: string) => d.threads.filter((t) => t.path === p)
+    .sort((a, b) => Number(a.isResolved) - Number(b.isResolved));
   const frameRef = useRef<HTMLDivElement>(null);
+  /**
+   * How tall the sticky toolbar is, right now.
+   *
+   * Anything scrolled to — a file picked in the tree, the next hunk, the next
+   * file under j/k — otherwise lands underneath it: `scrollIntoView` aligns to
+   * the top of the scroll box and knows nothing about a bar floating over that
+   * top. Measured rather than guessed, because the bar wraps to two rows on a
+   * narrow panel, and fed to `scroll-margin-top`, which is the property
+   * `scrollIntoView` actually honours.
+   */
+  const barRef = useRef<HTMLDivElement>(null);
+  const [barH, setBarH] = useState(76);
+  useEffect(() => {
+    const el = barRef.current;
+    if (!el) return;
+    const measure = () => setBarH(el.offsetHeight + 10);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  /**
+   * Scroll a file (or any element) to just under the sticky bar.
+   *
+   * `scrollIntoView` aligns to the top of the scrollport, and the bar floats
+   * over that top, so the thing you asked for lands behind it. `scroll-margin`
+   * is the documented cure and did not take here, so this does the arithmetic
+   * itself against the real scroll container: where the element sits inside it,
+   * minus the bar's measured height.
+   */
+  const scrollUnderBar = (el: Element | null | undefined) => {
+    if (!el) return;
+    const sc = el.closest<HTMLElement>(".agx-scroll");
+    if (!sc) { el.scrollIntoView({ block: "start" }); return; }
+    const top = el.getBoundingClientRect().top - sc.getBoundingClientRect().top + sc.scrollTop;
+    sc.scrollTo({ top: Math.max(0, top - (barRef.current?.offsetHeight ?? 76) - 8), behavior: "smooth" });
+  };
+  const [q, setQ] = useState("");
+  // Folded, not opened: every file is open by default and this records the ones
+  // you have put away. Seeded with the files too big to be a sensible default.
+  const [folded, setFolded] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    setQ("");
+    setFolded(new Set(d.files.filter((f) => f.additions + f.deletions > BIG_FILE_LINES).map((f) => f.path)));
+  }, [d.number, d.files]);
+
+  const shownFiles = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    return needle ? d.files.filter((f) => f.path.toLowerCase().includes(needle)) : d.files;
+  }, [d.files, q]);
+
+  const toggleFold = (p: string) => setFolded((cur) => {
+    const next = new Set(cur);
+    if (next.has(p)) next.delete(p); else next.add(p);
+    return next;
+  });
+  const allFolded = shownFiles.length > 0 && shownFiles.every((f) => folded.has(f.path));
 
   // The same keyboard model as the changes modal, so the two review surfaces
   // don't diverge: j/k walk the file list, n/p walk the hunks of the open diff,
   // x toggles reviewed. The diff itself is ChangesModal's UnifiedDiff/SplitDiff,
   // so its [data-hunk] markers and [data-vscroll] container are reused verbatim.
   const stepFile = (dir: 1 | -1) => {
-    const files = d.files;
+    const files = shownFiles;
     if (!files.length) return;
     const i = stepFileIndex(files.length, files.findIndex((f) => f.path === sel), dir);
     onSel(files[i].path);
-    requestAnimationFrame(() => frameRef.current?.querySelector('[data-file="active"]')?.scrollIntoView({ block: "nearest" }));
+    requestAnimationFrame(() => scrollUnderBar(frameRef.current?.querySelector('[data-file="active"]')));
   };
   const jumpHunk = (dir: 1 | -1) => {
     const frame = frameRef.current;
     if (!frame) return;
-    const sc = (frame.querySelector("[data-vscroll]") as HTMLElement | null) ?? frame;
+    // The page's scroller, the same one scrollUnderBar uses. It used to look for
+    // `[data-vscroll]`, the per-file inner scroller — which no longer exists now
+    // that files scroll with the page, so every jump was measured against the
+    // wrong box.
+    const sc = frame.closest<HTMLElement>(".agx-scroll") ?? frame;
     const heads = Array.from(sc.querySelectorAll<HTMLElement>("[data-hunk]"));
     if (!heads.length) return;
     const scTop = sc.getBoundingClientRect().top;
     const cur = sc.scrollTop;
     const tops = heads.map((h) => h.getBoundingClientRect().top - scTop + cur);
-    const target = dir === 1 ? tops.find((t) => t > cur + 4) : [...tops].reverse().find((t) => t < cur - 4);
-    sc.scrollTo({ top: (target ?? (dir === 1 ? tops[tops.length - 1] : tops[0])) - 2, behavior: "smooth" });
+    // Compare against the first line the reader can actually see, not the raw
+    // scrollTop: the sticky bar covers `barH` of it, so a hunk sitting under
+    // the bar counts as already passed and "next" would skip the one you are
+    // looking for. The same offset comes back off the destination, which is
+    // why this cannot use scroll-margin like the others do.
+    const eye = cur + barH;
+    const target = dir === 1 ? tops.find((t) => t > eye + 4) : [...tops].reverse().find((t) => t < eye - 4);
+    sc.scrollTo({ top: Math.max(0, (target ?? (dir === 1 ? tops[tops.length - 1] : tops[0])) - barH - 2), behavior: "smooth" });
   };
   const onKey = (e: React.KeyboardEvent) => {
     // Never while a field owns the keys — the PR search box, a comment textarea,
@@ -1111,6 +2416,7 @@ function FilesTab({ d, byPath, loaded, seenFiles, onSeen, sel, onSel, split, wra
     else if (k === "n") { e.preventDefault(); e.stopPropagation(); jumpHunk(1); }
     else if (k === "p") { e.preventDefault(); e.stopPropagation(); jumpHunk(-1); }
     else if (k === "x") { e.preventDefault(); e.stopPropagation(); if (sel) onSeen(sel); }
+    else if (k === "enter" || e.key === "Enter") { e.preventDefault(); e.stopPropagation(); if (sel) toggleFold(sel); }
   };
   // Focus the frame when the files tab mounts, so the keys work without a click
   // first — the same first-frame focus the changes modal does.
@@ -1118,52 +2424,152 @@ function FilesTab({ d, byPath, loaded, seenFiles, onSeen, sel, onSel, split, wra
 
   return (
     <div ref={frameRef} tabIndex={-1} onKeyDown={onKey} className="text-[11px] flex flex-col gap-2 outline-none">
-      <div className="flex items-center gap-2 text-[10px]" style={{ color: "var(--text3)" }}>
-        <span className="tabular-nums">{seenFiles.length}/{d.files.length} reviewed</span>
-        <span className="shrink-0 t-dim2 hidden sm:inline"><b>j/k</b> file · <b>n/p</b> hunk · <b>x</b> reviewed</span>
-        <Bar parts={[{ pct: d.files.length ? (seenFiles.length / d.files.length) * 100 : 0, tint: "var(--primary)" }]} />
+      {/* One bar, and it stays put: filter, view mode, progress. Everything that
+          used to be repeated on each file's own toolbar lives here once. */}
+      <div ref={barRef} className="flex flex-col gap-1 sticky top-0 z-30 py-1.5 px-1 -mx-1 rounded"
+        style={{ background: "var(--bg)", borderBottom: "1px solid color-mix(in srgb, var(--border) 22%, transparent)" }}>
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="flex items-center gap-1.5 px-2 py-1 rounded shrink-0"
+          style={{ border: "1px solid color-mix(in srgb, var(--border) 45%, transparent)" }}>
+          <span style={{ color: "var(--text3)" }}>⌕</span>
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter files…"
+            className="bg-transparent outline-none text-[10.5px] w-28" style={{ color: "var(--text2)" }} />
+          {q && <button onClick={() => setQ("")} title="Clear" style={{ color: "var(--text3)" }}>×</button>}
+        </span>
+        <Btn onClick={() => onSplit(false)} small primary={!split} title="One column, with a “+ Comment” target on every line">Unified</Btn>
+        <Btn onClick={() => onSplit(true)} small primary={split} title="Before and after, side by side">Split</Btn>
+        <Btn onClick={() => onWrap(!wrap)} small primary={wrap} title="Wrap long lines rather than scrolling them">Wrap</Btn>
+        <Btn onClick={() => setFolded(allFolded ? new Set() : new Set(shownFiles.map((f) => f.path)))} small>
+          {allFolded ? "Expand all" : "Collapse all"}
+        </Btn>
+        <span className="ml-auto flex items-center gap-2 min-w-[150px]">
+          <span className="tabular-nums shrink-0 text-[10px]" style={{ color: seenFiles.length === d.files.length ? "var(--success)" : "var(--text3)" }}>
+            {seenFiles.length} of {d.files.length} viewed
+          </span>
+          <Bar parts={[{ pct: d.files.length ? (seenFiles.length / d.files.length) * 100 : 0, tint: seenFiles.length === d.files.length ? "var(--success)" : "var(--primary)" }]} />
+        </span>
+      </div>
+      <div className="text-[10px] px-1" style={{ color: "var(--text3)" }}>
+        <b>j/k</b> file · <b>n/p</b> hunk · <b>x</b> viewed · <b>↵</b> fold
+        {q && <span> · showing {shownFiles.length} of {d.files.length}</span>}
+      </div>
       </div>
 
-      <div className="rounded overflow-hidden" style={{ border: "1px solid color-mix(in srgb, var(--border) 28%, transparent)" }}>
-        {d.files.map((f) => {
-          const done = seenFiles.includes(f.path);
-          const open = sel === f.path;
-          const nd = draftsFor(f.path);
-          return (
-            <div key={f.path} data-file={open ? "active" : undefined} className="flex items-center gap-2 px-2 py-1"
-              style={{
-                borderBottom: "1px solid color-mix(in srgb, var(--border) 18%, transparent)",
-                background: open ? "color-mix(in srgb, var(--primary) 12%, transparent)" : "transparent",
-                boxShadow: open ? "inset 2px 0 0 var(--primary)" : undefined,
-              }}>
-              {/* The tick means "I have read this" — a different intent from
-                  "show me this", so it is a different target. */}
-              <input type="checkbox" checked={done} onChange={() => onSeen(f.path)}
-                style={{ accentColor: "var(--primary)" }} title="Mark reviewed" aria-label={`Mark ${f.path} reviewed`} />
-              <button onClick={() => onSel(open ? null : f.path)} className="flex-1 min-w-0 text-left flex items-center gap-2">
+      {/* Tree on the left, diffs on the right — the arrangement GitHub uses, and
+          the only way to keep your bearings in a change that touches thirty
+          files. The tree is the navigator; the stack is still the reading. */}
+      <div className="flex gap-3 items-start">
+        {shownFiles.length > 4 && (
+          <aside className="shrink-0 w-[190px] sticky top-[68px] z-10 max-h-[calc(100vh-160px)] overflow-y-auto agx-scroll hidden md:block pr-1"
+            style={{ borderRight: "1px solid color-mix(in srgb, var(--border) 20%, transparent)" }}>
+            <FileTree
+              node={buildFileTree(shownFiles)} sel={sel}
+              onPick={(path) => { onSel(path); setFolded((cur) => { const n = new Set(cur); n.delete(path); return n; }); requestAnimationFrame(() => scrollUnderBar(frameRef.current?.querySelector(`[data-path="${CSS.escape(path)}"]`))); }}
+              seen={(path) => seenFiles.includes(path)}
+              drafts={draftsFor}
+            />
+          </aside>
+        )}
+        <div className="min-w-0 flex-1 flex flex-col gap-2">
+      {shownFiles.length === 0 && (
+        <div className="p-3 text-[10.5px]" style={{ color: "var(--text3)" }}>No file matches “{q}”.</div>
+      )}
+      {/* A file list that quietly disagreed with the header count is how nobody
+          noticed the hundred-and-first file was missing. Say it. */}
+      {d.truncated?.files ? (
+        <div className="text-[10px] px-1 py-1" style={{ color: "var(--warning)" }}>
+          {d.truncated.files} more file{d.truncated.files === 1 ? "" : "s"} changed than GitHub will return on one page — open it on GitHub to see the rest.
+        </div>
+      ) : null}
+
+      {shownFiles.map((f) => {
+        const done = seenFiles.includes(f.path);
+        const open = !folded.has(f.path);
+        const focused = sel === f.path;
+        const nd = draftsFor(f.path);
+        const change = byPath.get(f.path);
+        return (
+          <div key={f.path} data-file={focused ? "active" : undefined} data-path={f.path} className="rounded overflow-hidden"
+            style={{
+              border: `1px solid color-mix(in srgb, ${focused ? "var(--primary) 45%" : "var(--border) 30%"}, transparent)`,
+              opacity: done && !open ? 0.72 : 1,
+            }}>
+            <div className="flex items-center gap-2 px-2.5 py-1.5"
+              style={{ background: "color-mix(in srgb, var(--border) 12%, transparent)", borderBottom: open ? "1px solid color-mix(in srgb, var(--border) 25%, transparent)" : undefined }}>
+              <button onClick={() => { onSel(f.path); toggleFold(f.path); }} className="flex-1 min-w-0 text-left flex items-center gap-2">
                 <span className="shrink-0" style={{ color: "var(--text3)" }}>{open ? "▾" : "▸"}</span>
-                <span className="truncate" style={{ color: done ? "var(--text3)" : "var(--text2)", textDecoration: done ? "line-through" : undefined }}>{f.path}</span>
+                <span className="truncate" style={{ ...CODE_FONT_STYLE, color: done ? "var(--text3)" : "var(--text)" }}>{f.path}</span>
+                {f.status && f.status !== "modified" && <Chip text={f.status} tint="var(--text3)" />}
                 {f.comments > 0 && <Chip text={`${f.comments} open`} tint="var(--warning)" />}
                 {nd > 0 && <Chip text={`${nd} pending`} tint="var(--primary)" title="Queued in your review" />}
                 <span className="ml-auto shrink-0 tabular-nums" style={{ color: "var(--success)" }}>+{f.additions}</span>
                 <span className="shrink-0 tabular-nums" style={{ color: "var(--error)" }}>−{f.deletions}</span>
               </button>
+              {/* "Viewed" is state you keep for the length of a review, not a
+                  one-off tick — a switch says that and a checkbox does not. */}
+              <button onClick={() => onSeen(f.path)} title={done ? "Mark not viewed" : "Mark viewed"}
+                aria-pressed={done}
+                className="agx-btn shrink-0 flex items-center gap-1.5 text-[10px] px-1.5 py-0.5 rounded"
+                style={{ color: done ? "var(--success)" : "var(--text3)", border: `1px solid color-mix(in srgb, ${done ? "var(--success) 50%" : "var(--border) 45%"}, transparent)` }}>
+                <span className="agx-sw" data-on={done ? "1" : "0"} />Viewed
+              </button>
             </div>
-          );
-        })}
-      </div>
-
-      {sel && (
-        <div className="rounded overflow-hidden flex flex-col" style={{ border: "1px solid color-mix(in srgb, var(--border) 30%, transparent)", height: 560 }}>
-          <DiffToolbar path={sel} add={current?.additions} del={current?.deletions} split={split} wrap={wrap} onSplit={onSplit} onWrap={onWrap}
-            right={<span className="text-[10px] mr-1" style={{ color: "var(--text3)" }}>Unified shows “+ Comment”</span>} />
-          <div className="flex-1 min-h-0 flex">
-            {!loaded ? <div className="p-3 text-[10.5px]" style={{ color: "var(--text3)" }}>Loading the diff…</div>
-              : current ? <DiffPane file={current} split={split} wrap={wrap} onComment={(line) => onAddDraft(sel, line)} />
-              : <div className="p-3 text-[10.5px]" style={{ color: "var(--text3)" }}>No textual diff — binary, renamed, or too large to show</div>}
+            {open && (
+              <LazyMount minHeight={Math.min(320, 40 + (f.additions + f.deletions) * 18)}>
+                {/* No inner scroller: a scroll box inside the page scroll is
+                    how a click in the tree lands on a file you then cannot
+                    scroll, and it is not what GitHub does. Long files are
+                    folded by default instead, which is the honest cap. */}
+                <div className="flex" style={{ overflowX: "auto" }}>
+                  {/* An image first, and a file with no hunks second.
+                      `gh pr diff` still emits a header for a binary file — just
+                      "Binary files … differ" and nothing else — so the parser
+                      produces an entry with zero hunks. Testing `change` before
+                      the image put every PNG down the text path and rendered an
+                      empty diff pane, which is why the image viewer never
+                      appeared at all. */}
+                  {!loaded ? <div className="p-3 text-[10.5px]" style={{ color: "var(--text3)" }}>Loading the diff…</div>
+                    : diffKind(f.path, change?.hunks.length ?? 0) === "image"
+                      ? <ImageDiff root={root} number={d.number} path={f.path} status={f.status} />
+                    : change?.hunks.length ? (
+                      <DiffPane
+                        file={change} split={split} wrap={wrap}
+                        onPick={(pk) => pickLine(f.path, pk)}
+                        sel={selRange?.path === f.path ? selRange.sel : null}
+                        expand={(hi) => {
+                          // The gap between the end of the previous hunk and the
+                          // start of this one — the lines GitHub did not send.
+                          const h = change.hunks[hi];
+                          if (!h) return null;
+                          const prev = hi > 0 ? change.hunks[hi - 1] : null;
+                          const prevEnd = prev ? prev.newStart + prev.newLines - 1 : 0;
+                          const from = Math.max(prevEnd + 1, h.newStart - 20);
+                          const to = h.newStart - 1;
+                          if (to < from) return null;
+                          return <ExpandContext root={root} number={d.number} path={f.path} from={from} to={to} />;
+                        }}
+                      />
+                    )
+                    : <div className="p-3 text-[10.5px]" style={{ color: "var(--text3)" }}>No textual diff — binary, renamed, or too large to show</div>}
+                </div>
+              </LazyMount>
+            )}
+            {/* The conversation about THIS file, under it. The count in the
+                header said threads existed but you had to leave for the
+                conversation tab to read them, which is the wrong way round
+                while you are looking at the code they are about. */}
+            {open && threadsFor(f.path).length > 0 && (
+              <div className="px-2.5 py-2 flex flex-col gap-2" style={{ borderTop: "1px solid color-mix(in srgb, var(--border) 25%, transparent)", background: "color-mix(in srgb, var(--border) 6%, transparent)" }}>
+                {threadsFor(f.path).map((t) => (
+                  <Thread key={t.id} t={t} onResolve={onResolve} onReply={onReply} onApply={onApply} busy={busy} />
+                ))}
+              </div>
+            )}
           </div>
+        );
+      })}
         </div>
-      )}
+      </div>
     </div>
   );
 }
@@ -1175,8 +2581,13 @@ function FilesTab({ d, byPath, loaded, seenFiles, onSeen, sel, onSel, split, wra
 /** Out to GitHub, for the one thing the panel does not show — the full history
  *  of an edit, a reaction, the blame behind a line. */
 function GhLink({ href, title }: { href: string; title: string }) {
+  // Nothing rather than a link we cannot vouch for: every one of these comes
+  // out of an API response, and a link that does not navigate somewhere plain
+  // is not one we should be offering.
+  const safe = externalUrl(href);
+  if (!safe) return null;
   return (
-    <a href={href} target="_blank" rel="noreferrer noopener" title={title}
+    <a href={safe} target="_blank" rel="noreferrer noopener" title={title}
       className="shrink-0 text-[10px] px-1 rounded"
       style={{ color: "var(--text3)", border: "1px solid color-mix(in srgb, var(--border) 40%, transparent)" }}>↗</a>
   );
@@ -1191,8 +2602,88 @@ function Lane({ label, extra }: { label: string; extra?: string }) {
   );
 }
 
-function Card({ who, chip, when, tone, url, children }: {
-  who: string; chip?: React.ReactNode; when?: string; tone?: "chg" | "appr" | "bot"; url?: string; children: React.ReactNode;
+/** The eight GitHub allows, with the glyph each one renders as. */
+const REACTION_EMOJI: { content: string; glyph: string; title: string }[] = [
+  { content: "THUMBS_UP", glyph: "👍", title: "Like" },
+  { content: "THUMBS_DOWN", glyph: "👎", title: "Dislike" },
+  { content: "LAUGH", glyph: "😄", title: "Laugh" },
+  { content: "HOORAY", glyph: "🎉", title: "Hooray" },
+  { content: "CONFUSED", glyph: "😕", title: "Confused" },
+  { content: "HEART", glyph: "❤️", title: "Heart" },
+  { content: "ROCKET", glyph: "🚀", title: "Rocket" },
+  { content: "EYES", glyph: "👀", title: "Eyes" },
+];
+
+/**
+ * Emoji on a comment, as GitHub has them: the ones already pressed are shown
+ * with their tally, and a `+` opens the rest. Acknowledging with a reaction is
+ * how a thread stays short — the alternative is another comment saying "agreed".
+ */
+function Reactions({ nodeId, reactions, onReact }: {
+  nodeId?: string; reactions?: PrReaction[]; onReact?: (nodeId: string, content: string, on: boolean) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const has = reactions ?? [];
+  if (!onReact || !nodeId) {
+    if (!has.length) return null;
+    return (
+      <div className="flex gap-1 flex-wrap mt-2">
+        {has.map((r) => <span key={r.content} className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ border: "1px solid color-mix(in srgb, var(--border) 45%, transparent)", color: "var(--text2)" }}>{REACTION_EMOJI.find((e) => e.content === r.content)?.glyph ?? "•"} {r.count}</span>)}
+      </div>
+    );
+  }
+  return (
+    <div className="flex gap-1 flex-wrap items-center mt-2">
+      {has.map((r) => {
+        const e = REACTION_EMOJI.find((x) => x.content === r.content);
+        return (
+          <button key={r.content} onClick={() => onReact(nodeId, r.content, !r.viewerHasReacted)}
+            title={r.viewerHasReacted ? "Remove your reaction" : e?.title}
+            className="agx-btn text-[10px] px-1.5 py-0.5 rounded-full tabular-nums"
+            style={{
+              border: `1px solid ${r.viewerHasReacted ? "var(--primary)" : "color-mix(in srgb, var(--border) 45%, transparent)"}`,
+              background: r.viewerHasReacted ? "color-mix(in srgb, var(--primary) 16%, transparent)" : "transparent",
+              color: r.viewerHasReacted ? "var(--primary-hover)" : "var(--text2)",
+            }}>
+            {e?.glyph ?? "•"} {r.count}
+          </button>
+        );
+      })}
+      <div className="relative">
+        <button onClick={() => setOpen((v) => !v)} title="Add a reaction" aria-label="Add a reaction"
+          className="agx-btn text-[10px] px-1.5 py-0.5 rounded-full"
+          style={{ border: "1px dashed color-mix(in srgb, var(--border) 45%, transparent)", color: "var(--text3)" }}>☺ +</button>
+        {open && (
+          <div className="absolute z-20 mt-1 flex gap-0.5 p-1 rounded-lg"
+            style={{ background: "color-mix(in srgb, var(--bg2) 97%, black)", border: "1px solid color-mix(in srgb, var(--border) 60%, transparent)", boxShadow: "0 12px 30px -14px rgba(0,0,0,.7)" }}>
+            {REACTION_EMOJI.map((e) => {
+              const mine = has.find((r) => r.content === e.content)?.viewerHasReacted ?? false;
+              return (
+                <button key={e.content} title={e.title}
+                  onClick={() => { onReact(nodeId, e.content, !mine); setOpen(false); }}
+                  className="agx-btn text-[13px] px-1 rounded hover:bg-white/10">{e.glyph}</button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** OWNER / MEMBER / CONTRIBUTOR — how much weight a remark carries, at a glance. */
+function AssocChip({ a }: { a?: PrAuthorAssociation }) {
+  if (!a || a === "NONE" || a === "MANNEQUIN") return null;
+  const label = a === "FIRST_TIME_CONTRIBUTOR" || a === "FIRST_TIMER" ? "first-time" : a.toLowerCase();
+  const tint = a === "OWNER" || a === "MEMBER" ? "var(--primary)" : "var(--text3)";
+  return <Chip text={label} tint={tint} title={`GitHub says this author is ${label}`} />;
+}
+
+function Card({ who, chip, when, tone, url, edited, assoc, nodeId, reactions, onReact, children }: {
+  who: string; chip?: React.ReactNode; when?: string; tone?: "chg" | "appr" | "bot"; url?: string;
+  edited?: string | null; assoc?: PrAuthorAssociation;
+  nodeId?: string; reactions?: PrReaction[]; onReact?: (nodeId: string, content: string, on: boolean) => void;
+  children: React.ReactNode;
 }) {
   const edge = tone === "chg" ? "var(--error)" : tone === "appr" ? "var(--success)" : tone === "bot" ? "var(--info)" : "var(--border)";
   return (
@@ -1202,13 +2693,20 @@ function Card({ who, chip, when, tone, url, children }: {
         style={{ background: `color-mix(in srgb, ${edge} ${tone ? 10 : 14}%, transparent)`, borderBottom: "1px solid color-mix(in srgb, var(--border) 22%, transparent)" }}>
         <Avatar login={who} size={17} />
         <b style={{ color: "var(--text)", fontWeight: 500 }}>{who}</b>
+        <AssocChip a={assoc} />
         {chip}
         <span className="ml-auto flex items-center gap-1.5 shrink-0">
           {when && <span className="text-[10px]" style={{ color: "var(--text3)" }}>{when}</span>}
+          {/* GitHub says "edited" here, and it matters: the words you are
+              reading may not be the words that were replied to. */}
+          {edited && <span className="text-[10px]" title={`Edited ${ago(edited)}`} style={{ color: "var(--text3)" }}>· edited</span>}
           {url && <GhLink href={url} title="Open on GitHub" />}
         </span>
       </div>
-      <div className="px-3 py-2.5">{children}</div>
+      <div className="px-3 py-2.5">
+        {children}
+        <Reactions nodeId={nodeId} reactions={reactions} onReact={onReact} />
+      </div>
     </div>
   );
 }
@@ -1259,14 +2757,23 @@ function ThreadSnippet({ hunk, line }: { hunk?: string; line?: number | null }) 
   );
 }
 
-function Thread({ t, onResolve, onReply, busy }: {
-  t: PrThread; onResolve: (t: PrThread) => void; onReply: (t: PrThread) => void; busy: boolean;
+function Thread({ t, onResolve, onReply, onApply, busy }: {
+  t: PrThread; onResolve: (t: PrThread) => void; onReply: (t: PrThread) => void;
+  onApply?: (t: PrThread, text: string) => void; busy: boolean;
 }) {
   // The REST reply endpoint takes the numeric comment id. `id` is a GraphQL
   // node id (`PRRC_kwDO…`) and `Number()` of that is NaN — which is why reply
   // could never have worked before `databaseId` was asked for.
   const canReply = typeof t.comments[0]?.databaseId === "number";
+  // A suggestion inside this thread knows the file and the lines because the
+  // thread does. An outdated thread is refused: its lines have moved, so the
+  // range in hand no longer points where the comment meant.
+  const suggest = useMemo(
+    () => (onApply && !t.isOutdated && t.line ? { apply: (text: string) => onApply(t, text), busy } : null),
+    [onApply, t, busy],
+  );
   return (
+    <SuggestCtx.Provider value={suggest}>
     <div className="rounded-md overflow-hidden mb-2" style={{ border: "1px solid color-mix(in srgb, var(--border) 28%, transparent)" }}>
       <div className="flex items-center gap-2 px-2.5 py-1.5 text-[10.5px]"
         style={{ background: "color-mix(in srgb, var(--border) 14%, transparent)", borderBottom: "1px solid color-mix(in srgb, var(--border) 22%, transparent)" }}>
@@ -1299,82 +2806,435 @@ function Thread({ t, onResolve, onReply, busy }: {
         <Btn onClick={() => onResolve(t)} disabled={busy} ok={!t.isResolved} small>{t.isResolved ? "Unresolve" : "Resolve conversation"}</Btn>
       </div>
     </div>
+    </SuggestCtx.Provider>
   );
 }
 
-function Conversation({ d, lanes, raw, onRaw, onResolve, onReply, busy }: {
+/**
+ * The conversation, as one timeline.
+ *
+ * It used to be four lanes — humans, line threads, automation, raw — each a
+ * separate pile under its own rule. That splits a verdict from its reasons and
+ * makes "what happened here, in what order" unanswerable: you read a pile of
+ * replies, then scrolled back up to find what they were replying to.
+ *
+ * Now everything that happened is one list in the order it happened, on a rail,
+ * with a node per entry saying what kind of thing it was. A review still owns
+ * the threads submitted with it, because that grouping IS the meaning: a
+ * "requested changes" is a verdict and the threads under it are the reasons.
+ */
+/** "X and claude committed", or "X, Y and 2 others" — how GitHub credits a
+ *  commit that carries Co-authored-by trailers. */
+function commitAuthorLine(c: PrCommit): string {
+  const who = c.authors?.length ? c.authors : (c.author ? [c.author] : []);
+  if (who.length === 0) return "unknown";
+  if (who.length === 1) return `${who[0]} committed`;
+  if (who.length === 2) return `${who[0]} and ${who[1]} committed`;
+  return `${who[0]}, ${who[1]} and ${who.length - 2} other${who.length - 2 === 1 ? "" : "s"} committed`;
+}
+
+/** Commits under the day they landed, newest day last (the branch's own order). */
+function groupCommitsByDay(commits: PrCommit[]): [string, PrCommit[]][] {
+  const out: [string, PrCommit[]][] = [];
+  for (const c of commits) {
+    const day = c.committedAt
+      ? new Date(c.committedAt).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })
+      : "Undated";
+    const last = out[out.length - 1];
+    if (last && last[0] === day) last[1].push(c);
+    else out.push([day, [c]]);
+  }
+  return out;
+}
+
+const EVENT_GLYPH: Record<string, string> = {
+  "force-push": "↻", renamed: "✎", labeled: "🏷", unlabeled: "🏷",
+  assigned: "👤", unassigned: "👤", "review-requested": "👁", "review-request-removed": "👁",
+  "ready-for-review": "◉", "convert-to-draft": "◌", merged: "⏣", closed: "✕", reopened: "↺",
+  "cross-referenced": "🔗", milestoned: "◈", demilestoned: "◈", "head-ref-deleted": "⌫",
+  "auto-merge-enabled": "⏱", "auto-merge-disabled": "⏱",
+};
+const EVENT_TINT: Record<string, string> = {
+  "force-push": "var(--warning)", merged: "var(--primary)", closed: "var(--error)",
+  reopened: "var(--success)", "ready-for-review": "var(--success)",
+};
+
+/** One non-comment event, written the way GitHub words it. */
+function TimelineEvent({ e }: { e: PrEvent }) {
+  const who = <b style={{ color: "var(--text2)" }}>{e.actor || "somebody"}</b>;
+  const mono = (t: string) => <code style={{ ...CODE_FONT_STYLE, color: "var(--text2)" }}>{t}</code>;
+  const said = (() => {
+    switch (e.kind) {
+      case "force-push": return <>{who} force-pushed {e.detail ? mono(e.detail) : null}</>;
+      case "renamed": return <>{who} changed the title to “{e.detail}”</>;
+      case "labeled": return <>{who} added the <Chip text={e.detail || ""} tint={e.tint ? `#${e.tint}` : "var(--primary)"} /> label</>;
+      case "unlabeled": return <>{who} removed the <Chip text={e.detail || ""} tint="var(--text3)" /> label</>;
+      case "assigned": return <>{who} assigned <b style={{ color: "var(--text2)" }}>{e.detail}</b></>;
+      case "unassigned": return <>{who} unassigned <b style={{ color: "var(--text2)" }}>{e.detail}</b></>;
+      case "review-requested": return <>{who} requested a review from <b style={{ color: "var(--text2)" }}>{e.detail}</b></>;
+      case "review-request-removed": return <>{who} withdrew the review request for {e.detail}</>;
+      case "ready-for-review": return <>{who} marked this ready for review</>;
+      case "convert-to-draft": return <>{who} converted this to a draft</>;
+      case "merged": return <>{who} merged this into {mono(e.detail || "")}</>;
+      case "closed": return <>{who} closed this</>;
+      case "reopened": return <>{who} reopened this</>;
+      case "cross-referenced": return <>{who} mentioned this in {e.detail}</>;
+      case "milestoned": return <>{who} added this to the {e.detail} milestone</>;
+      case "demilestoned": return <>{who} removed this from the {e.detail} milestone</>;
+      case "head-ref-deleted": return <>{who} deleted the {mono(e.detail || "")} branch</>;
+      case "auto-merge-enabled": return <>{who} armed auto-merge</>;
+      case "auto-merge-disabled": return <>{who} cancelled auto-merge{e.detail ? ` (${e.detail})` : ""}</>;
+      default: return <>{who} did something</>;
+    }
+  })();
+  const inner = <span>{said} <span style={{ color: "var(--text3)" }}>· {ago(e.at)}</span></span>;
+  return (
+    <div className="agx-tiny">
+      {e.url ? <a href={externalUrl(e.url)} target="_blank" rel="noreferrer noopener" style={{ color: "inherit" }}>{inner}</a> : inner}
+    </div>
+  );
+}
+
+function Conversation({ d, lanes, raw, onRaw, onResolve, onReply, onComment, onReact, onApply, busy }: {
   d: PrDetail;
   lanes: { humans: PrReview[]; botReviews: PrReview[]; humanComments: PrComment[]; bots: PrComment[] };
   raw: boolean; onRaw: (v: boolean) => void;
-  onResolve: (t: PrThread) => void; onReply: (t: PrThread) => void; busy: boolean;
+  onResolve: (t: PrThread) => void; onReply: (t: PrThread) => void;
+  onApply?: (t: PrThread, text: string) => void;
+  onComment: (body: string) => Promise<boolean>;
+  onReact: (nodeId: string, content: string, on: boolean) => void;
+  busy: boolean;
 }) {
+  const [newest, setNewest] = useState(false);
   const kb = Math.round(lanes.bots.reduce((n, c) => n + c.body.length, 0) / 1024);
-  // Threads whose author never submitted a review of their own — a bot's
-  // findings, or a comment left outside a review. They still need a home.
   const reviewAuthors = new Set(lanes.humans.map((r) => r.author));
   const orphanThreads = d.threads.filter((t) => !reviewAuthors.has(t.comments[0]?.author ?? ""));
 
+  type Entry = { at: string; key: string; node: React.ReactNode; body: React.ReactNode };
+  const entries: Entry[] = [];
+
+  for (const [i, r] of lanes.humans.entries()) {
+    const mine = d.threads.filter((t) => t.comments[0]?.author === r.author);
+    const tone = r.state === "CHANGES_REQUESTED" ? "chg" : r.state === "APPROVED" ? "appr" : undefined;
+    entries.push({
+      at: r.submittedAt, key: `r${i}`,
+      node: <span style={{ color: tone === "chg" ? "var(--error)" : tone === "appr" ? "var(--success)" : "var(--text3)" }}>
+        {r.state === "CHANGES_REQUESTED" ? "✕" : r.state === "APPROVED" ? "✓" : "💬"}</span>,
+      body: (
+        <>
+          <Card who={r.author} when={ago(r.submittedAt)} url={r.url} tone={tone}
+            edited={r.editedAt} assoc={r.association} nodeId={r.nodeId} reactions={r.reactions} onReact={onReact}
+            chip={r.state === "CHANGES_REQUESTED" ? <Chip text="requested changes" tint="var(--error)" />
+              : r.state === "APPROVED" ? <Chip text="approved" tint="var(--success)" /> : undefined}>
+            {r.body ? <Md body={r.body} />
+              : <span style={{ color: "var(--text3)" }}>({r.state.toLowerCase().replace("_", " ")}, no note)</span>}
+          </Card>
+          {mine.length > 0 && (
+            <div className="pl-3 ml-2" style={{ borderLeft: "2px solid color-mix(in srgb, var(--border) 40%, transparent)" }}>
+              {mine.map((t) => <Thread key={t.id} t={t} onResolve={onResolve} onReply={onReply} onApply={onApply} busy={busy} />)}
+            </div>
+          )}
+        </>
+      ),
+    });
+  }
+  for (const c of lanes.humanComments) {
+    entries.push({
+      at: c.createdAt, key: `c${c.id}`, node: <span style={{ color: "var(--text3)" }}>💬</span>,
+      body: <Card who={c.author} when={ago(c.createdAt)} url={c.url}
+        edited={c.editedAt} assoc={c.association} nodeId={c.nodeId} reactions={c.reactions} onReact={onReact}><Md body={c.body} /></Card>,
+    });
+  }
+  for (const t of orphanThreads) {
+    entries.push({
+      at: t.comments[0]?.createdAt ?? "", key: `t${t.id}`,
+      node: <span style={{ color: t.isResolved ? "var(--success)" : "var(--warning)" }}>{t.isResolved ? "✓" : "○"}</span>,
+      body: <Thread t={t} onResolve={onResolve} onReply={onReply} onApply={onApply} busy={busy} />,
+    });
+  }
+  for (const [i, r] of lanes.botReviews.entries()) {
+    entries.push({
+      at: r.submittedAt, key: `br${i}`, node: <span style={{ color: "var(--info)" }}>⌬</span>,
+      body: <Card who={r.author} when={ago(r.submittedAt)} url={r.url} tone="bot"
+        nodeId={r.nodeId} reactions={r.reactions} onReact={onReact}
+        chip={<Chip text="automation" tint="var(--info)" />}><Md body={r.body} /></Card>,
+    });
+  }
+  for (const c of lanes.bots) {
+    entries.push({
+      at: c.createdAt, key: `b${c.id}`, node: <span style={{ color: "var(--info)" }}>⌬</span>,
+      body: (
+        <Card who={c.author} when={ago(c.createdAt)} url={c.url} tone="bot" chip={<Chip text="automation" tint="var(--info)" />}
+          nodeId={c.nodeId} reactions={c.reactions} onReact={onReact}>
+          {raw
+            ? <pre className="overflow-x-auto text-[10px] max-h-72 agx-scroll" style={{ ...CODE_FONT_STYLE, color: "var(--text3)" }}>{c.body}</pre>
+            : <span style={{ color: "var(--text2)" }}>{c.digest || "(Nothing worth pulling out)"}</span>}
+        </Card>
+      ),
+    });
+  }
+
+  // The events between the remarks: pushes, renames, labels, the merge itself.
+  // Without them the conversation reads as if nothing happened between comments
+  // — the force-push that invalidated a review simply is not there.
+  for (const [i, e] of d.timeline.entries()) {
+    entries.push({
+      at: e.at, key: `e${i}`,
+      node: <span style={{ color: EVENT_TINT[e.kind] ?? "var(--text3)" }}>{EVENT_GLYPH[e.kind] ?? "•"}</span>,
+      body: <TimelineEvent e={e} />,
+    });
+  }
+
+  entries.sort((a, b) => (newest ? b.at.localeCompare(a.at) : a.at.localeCompare(b.at)));
+
+  /* The events between the comments. GitHub has no timestamp on either of these
+     — "opened" is not on the detail payload and a force-push is a boolean —
+     so they are anchored to the ends of the timeline rather than given a time
+     they would be making up. */
+  const opened = (
+    <div key="opened" className="agx-tiny">
+      <span className="agx-node">＋</span>
+      <span><b>{d.author}</b> opened this pull request from <code style={{ ...CODE_FONT_STYLE, color: "var(--primary)" }}>{d.headRefName}</code> into <code style={{ ...CODE_FONT_STYLE, color: "var(--text2)" }}>{d.baseRefName}</code></span>
+    </div>
+  );
+  /* The real force-push events now come from the timeline with their own
+     timestamps, so this is only the *warning* that the newest one invalidated a
+     review — a judgement the raw event cannot make. */
+  const forced = d.forcePushedSinceReview ? (
+    <div key="forced" className="agx-tiny">
+      <span className="agx-node" style={{ color: "var(--warning)" }}>↻</span>
+      <span style={{ color: "var(--warning)" }}>The last review was for code that is no longer here — it was force-pushed over</span>
+    </div>
+  ) : null;
+
+  const composer = <Composer onSend={onComment} busy={busy} placeholder="Leave a comment — markdown works here" sendLabel="Comment" onOpenGithub={() => openExternal(d.url)} />;
+
+  if (entries.length === 0) {
+    return (
+      <div className="text-[11px]">
+        <div className="agx-tl">{opened}</div>
+        <div className="text-[11px] mb-3" style={{ color: "var(--text3)" }}>Nobody has said anything yet.</div>
+        {composer}
+      </div>
+    );
+  }
+
   return (
     <div className="text-[11px]">
-      <Lane label="humans" />
-      {lanes.humans.length === 0 && lanes.humanComments.length === 0 && (
-        <div style={{ color: "var(--text3)" }}>Nobody has said anything yet.</div>
-      )}
-      {lanes.humans.map((r, i) => {
-        // The line comments that belong to THIS review. GitHub nests them under
-        // the review they were submitted with, and that grouping is most of the
-        // meaning: a "requested changes" is a verdict, and the threads beneath
-        // it are the reasons. Split apart into separate lanes, you get a
-        // verdict with no reasons and a pile of reasons with no verdict.
-        const mine = d.threads.filter((t) => t.comments[0]?.author === r.author);
-        return (
-          <div key={`r${i}`} className="mb-2">
-            <Card who={r.author} when={ago(r.submittedAt)} url={r.url}
-              tone={r.state === "CHANGES_REQUESTED" ? "chg" : r.state === "APPROVED" ? "appr" : undefined}
-              chip={r.state === "CHANGES_REQUESTED" ? <Chip text="requested changes" tint="var(--error)" />
-                : r.state === "APPROVED" ? <Chip text="approved" tint="var(--success)" /> : undefined}>
-              {r.body ? <Md body={r.body} /> : <span style={{ color: "var(--text3)" }}>({r.state.toLowerCase().replace("_", " ")}, no note)</span>}
-            </Card>
-            {mine.length > 0 && (
-              <div className="pl-3 ml-2" style={{ borderLeft: "2px solid color-mix(in srgb, var(--border) 40%, transparent)" }}>
-                {mine.map((t) => <Thread key={t.id} t={t} onResolve={onResolve} onReply={onReply} busy={busy} />)}
-              </div>
-            )}
+      <div className="flex items-center gap-2 mb-3 text-[10px]" style={{ color: "var(--text3)" }}>
+        <span>One timeline — reviews, comments, threads and events in the order they happened</span>
+        {d.truncated?.comments ? (
+          <span style={{ color: "var(--warning)" }}>· showing the most recent {d.truncated.comments}</span>
+        ) : null}
+        <span className="flex-1" />
+        {lanes.bots.length > 0 && (
+          <Btn small onClick={() => onRaw(!raw)}>
+            {raw ? "Digest automation" : `Show automation in full · ${kb} KB`}
+          </Btn>
+        )}
+        <Btn small onClick={() => setNewest(false)} primary={!newest}>Oldest</Btn>
+        <Btn small onClick={() => setNewest(true)} primary={newest}>Newest</Btn>
+      </div>
+      <div className="agx-tl">
+        {!newest && opened}
+        {newest && forced}
+        {entries.map((e) => (
+          <div key={e.key} className="agx-ev">
+            <span className="agx-node">{e.node}</span>
+            {e.body}
           </div>
-        );
-      })}
-      {lanes.humanComments.map((c) => (
-        <Card key={c.id} who={c.author} when={ago(c.createdAt)} url={c.url}><Md body={c.body} /></Card>
-      ))}
+        ))}
+        {!newest && forced}
+        {newest && opened}
+      </div>
+      <div className="mt-3">{composer}</div>
+    </div>
+  );
+}
 
-      {orphanThreads.length > 0 && (
-        <>
-          <Lane label="line threads" extra={`${orphanThreads.filter((t) => !t.isResolved).length} open of ${orphanThreads.length}`} />
-          {orphanThreads.map((t) => <Thread key={t.id} t={t} onResolve={onResolve} onReply={onReply} busy={busy} />)}
-        </>
-      )}
+/**
+ * Write, preview, send. Shared by the conversation and by anywhere else that
+ * takes markdown, so the two never drift into behaving differently.
+ */
+function Composer({ onSend, busy, placeholder, sendLabel, onOpenGithub }: {
+  onSend: (body: string) => Promise<boolean>; busy: boolean; placeholder: string; sendLabel: string;
+  /** Opens this pull request on GitHub — the only place an image can actually
+   *  be attached. */
+  onOpenGithub?: () => void;
+}) {
+  const [text, setText] = useState("");
+  const [preview, setPreview] = useState(false);
+  const [sending, setSending] = useState(false);
+  const taRef = useRef<HTMLTextAreaElement>(null);
 
-      <Lane label="automation" extra={lanes.bots.length ? `${lanes.bots.length} comments · ${kb} KB` : undefined} />
-      {lanes.botReviews.map((r, i) => (
-        <Card key={`br${i}`} who={r.author} when={ago(r.submittedAt)} url={r.url} tone="bot" chip={<Chip text="automation" tint="var(--info)" />}>
-          <Md body={r.body} />
-        </Card>
-      ))}
-      {lanes.bots.length > 0 && (
-        <>
-          <button onClick={() => onRaw(!raw)} className="w-full text-left text-[10px] px-2.5 py-1.5 rounded mb-2"
-            style={{ color: "var(--text2)", border: "1px dashed color-mix(in srgb, var(--border) 50%, transparent)" }}>
-            <span style={{ color: "var(--primary)" }}>{raw ? "▾" : "▸"}</span>{" "}
-            {lanes.bots.length} machine comment{lanes.bots.length === 1 ? "" : "s"} · {kb} KB {raw ? "— hide raw" : "collapsed — show raw"}
-          </button>
-          {lanes.bots.map((c) => (
-            <Card key={c.id} who={c.author} when={ago(c.createdAt)} url={c.url} tone="bot" chip={<Chip text="automation" tint="var(--info)" />}>
-              {raw ? <pre className="overflow-x-auto text-[10px] max-h-72 agx-scroll" style={{ ...CODE_FONT_STYLE, color: "var(--text3)" }}>{c.body}</pre>
-                : <span style={{ color: "var(--text2)" }}>{c.digest || "(Nothing worth pulling out)"}</span>}
-            </Card>
-          ))}
-        </>
+  /**
+   * `@`, `#` and `:` complete.
+   *
+   * Typing a collaborator's login or an issue number from memory means leaving
+   * the panel to look it up, which is exactly the trip this is meant to save.
+   * The trigger is the token immediately before the caret; Enter or Tab takes
+   * the highlighted match, Escape drops the menu without touching the text.
+   */
+  const mentions = useContext(MentionCtx);
+  const [ac, setAc] = useState<{ kind: "@" | "#" | ":"; q: string; at: number } | null>(null);
+  const [acIdx, setAcIdx] = useState(0);
+
+  type AcItem = { insert: string; label: string; hint?: string };
+  const matches = useMemo<AcItem[]>(() => {
+    if (!ac) return [];
+    const q = ac.q.toLowerCase();
+    if (ac.kind === "@") {
+      return (mentions?.users ?? [])
+        .filter((u) => u.toLowerCase().includes(q))
+        .slice(0, 8).map((u) => ({ insert: `@${u} `, label: u }));
+    }
+    if (ac.kind === "#") {
+      return (mentions?.issues ?? [])
+        .filter((i) => String(i.number).startsWith(q) || i.title.toLowerCase().includes(q))
+        .slice(0, 8).map((i) => ({ insert: `#${i.number} `, label: `#${i.number}`, hint: i.title.slice(0, 44) }));
+    }
+    return Object.keys(EMOJI_NAMES).filter((n) => n.startsWith(q)).slice(0, 8)
+      .map((n) => ({ insert: `:${n}: `, label: `${EMOJI_NAMES[n]}  :${n}:` }));
+  }, [ac, mentions]);
+
+  const onType = (v: string, caret: number) => {
+    setText(v);
+    // Only the token the caret is sitting in, and only at a word boundary —
+    // an email address must not open a mention menu.
+    const before = v.slice(0, caret);
+    const m = /(^|[\s(])([@#:])([\w.-]*)$/.exec(before);
+    if (!m) { setAc(null); return; }
+    setAc({ kind: m[2] as "@", q: m[3] ?? "", at: caret - (m[3]?.length ?? 0) - 1 });
+    setAcIdx(0);
+  };
+
+  const take = (i: number) => {
+    const pick = matches[i];
+    if (!ac || !pick) return;
+    const next = text.slice(0, ac.at) + pick.insert + text.slice(ac.at + 1 + ac.q.length);
+    setText(next);
+    setAc(null);
+    requestAnimationFrame(() => {
+      const el = taRef.current;
+      if (!el) return;
+      const pos = ac.at + pick.insert.length;
+      el.focus();
+      el.setSelectionRange(pos, pos);
+    });
+  };
+
+  /**
+   * Files dropped or pasted into the composer.
+   *
+   * A text file is inserted as a fenced code block, which is what you wanted it
+   * for and needs nobody's permission. An image cannot be: GitHub has no public
+   * attachment-upload API — their paperclip is web-only, and there is no gist
+   * mutation or attachments endpoint to stand in for it (checked, not assumed).
+   * Rather than invent a place to put the bytes (committing screenshots into the
+   * repository is not a favour), it says so and offers the one thing that does
+   * work: attaching it on GitHub itself.
+   */
+  const [imageNote, setImageNote] = useState<string | null>(null);
+  const TEXTY = /\.(md|txt|log|json|jsonc|ya?ml|toml|ini|csv|tsv|diff|patch|ts|tsx|js|jsx|mjs|cjs|py|rb|go|rs|java|kt|c|h|cpp|hpp|cs|sh|bash|zsh|sql|html?|css|scss|xml|svg)$/i;
+
+  const takeFiles = async (files: File[]) => {
+    if (!files.length) return;
+    const image = files.find((f) => f.type.startsWith("image/"));
+    if (image) {
+      setImageNote(image.name);
+      return;
+    }
+    const parts: string[] = [];
+    for (const f of files.slice(0, 4)) {
+      if (!TEXTY.test(f.name) && !f.type.startsWith("text/")) continue;
+      // A composer is not a file host: enough to quote, not enough to hang the
+      // panel pasting a 40MB log.
+      const body = (await f.text()).slice(0, 60_000);
+      const lang = (f.name.split(".").pop() ?? "").toLowerCase();
+      parts.push(`**${f.name}**\n\n\`\`\`${lang}\n${body}\n\`\`\``);
+    }
+    if (!parts.length) { setImageNote(files[0]?.name ?? "that file"); return; }
+    setText((t) => (t ? `${t}\n\n` : "") + parts.join("\n\n"));
+    setImageNote(null);
+  };
+
+  const send = async () => {
+    if (!text.trim() || sending) return;
+    setSending(true);
+    const ok = await onSend(text);
+    setSending(false);
+    if (ok) { setText(""); setPreview(false); }
+  };
+
+  return (
+    <div className="rounded-lg overflow-hidden"
+      onDragOver={(e) => e.preventDefault()}
+      onDrop={(e) => { e.preventDefault(); void takeFiles([...e.dataTransfer.files]); }}
+      onPaste={(e) => { const fs = [...e.clipboardData.files]; if (fs.length) { e.preventDefault(); void takeFiles(fs); } }}
+      style={{ border: "1px solid color-mix(in srgb, var(--border) 38%, transparent)" }}>
+      <div className="flex items-center gap-1 px-2 py-1.5" style={{ borderBottom: "1px solid color-mix(in srgb, var(--border) 25%, transparent)" }}>
+        <Btn onClick={() => setPreview(false)} small primary={!preview}>Write</Btn>
+        <Btn onClick={() => setPreview(true)} small primary={preview}>Preview</Btn>
+      </div>
+      {imageNote && (
+        <div className="flex items-center gap-2 px-2.5 py-1.5 text-[10.5px]"
+          style={{ color: "var(--warning)", background: "color-mix(in srgb, var(--warning) 10%, transparent)", borderBottom: "1px solid color-mix(in srgb, var(--border) 25%, transparent)" }}>
+          <span className="min-w-0 truncate">
+            <b>{imageNote}</b> can't be attached from here — GitHub has no public upload API for attachments.
+          </span>
+          {onOpenGithub && (
+            <button onClick={onOpenGithub} className="agx-btn ml-auto shrink-0 px-2 py-0.5 rounded"
+              style={{ color: "var(--warning)", border: "1px solid color-mix(in srgb, var(--warning) 45%, transparent)" }}>Attach on GitHub ↗</button>
+          )}
+          <button onClick={() => setImageNote(null)} className="agx-btn shrink-0 px-1" style={{ color: "var(--text3)" }} aria-label="Dismiss">×</button>
+        </div>
       )}
+      {preview ? (
+        <div className="p-3 min-h-[80px]">{text.trim() ? <Md body={text} /> : <span className="text-[11px]" style={{ color: "var(--text3)" }}>Nothing to preview.</span>}</div>
+      ) : (
+        <div className="relative">
+          <textarea
+            ref={taRef}
+            value={text}
+            onChange={(e) => onType(e.target.value, e.target.selectionStart ?? e.target.value.length)}
+            rows={4} placeholder={placeholder}
+            onKeyDown={(e) => {
+              if (ac && matches.length) {
+                if (e.key === "ArrowDown") { e.preventDefault(); setAcIdx((i) => (i + 1) % matches.length); return; }
+                if (e.key === "ArrowUp") { e.preventDefault(); setAcIdx((i) => (i - 1 + matches.length) % matches.length); return; }
+                if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); take(acIdx); return; }
+                if (e.key === "Escape") { e.preventDefault(); setAc(null); return; }
+              }
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void send(); }
+            }}
+            className="w-full p-3 text-[11.5px] outline-none resize-y bg-transparent agx-scroll"
+            style={{ color: "var(--text)", lineHeight: 1.6 }}
+          />
+          {ac && matches.length > 0 && (
+            <div className="absolute left-3 bottom-2 z-20 rounded-lg overflow-hidden"
+              style={{ background: "color-mix(in srgb, var(--bg2) 97%, black)", border: "1px solid color-mix(in srgb, var(--border) 60%, transparent)", boxShadow: "0 14px 34px -16px rgba(0,0,0,.75)" }}>
+              {matches.map((m, i) => (
+                <button key={m.label} onMouseEnter={() => setAcIdx(i)} onClick={() => take(i)}
+                  className="agx-btn w-full text-left flex items-center gap-2 px-2.5 py-1 text-[11px]"
+                  style={{ background: i === acIdx ? "color-mix(in srgb, var(--primary) 22%, transparent)" : "transparent", color: "var(--text2)" }}>
+                  <span>{m.label}</span>
+                  {m.hint && <span className="truncate text-[10px]" style={{ color: "var(--text3)" }}>{m.hint}</span>}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      <div className="flex items-center gap-2 px-2.5 py-2"
+        style={{ borderTop: "1px solid color-mix(in srgb, var(--border) 25%, transparent)", background: "color-mix(in srgb, var(--border) 12%, transparent)" }}>
+        <span className="text-[10px]" style={{ color: "var(--text3)" }}>Markdown · <b>@</b> people · <b>#</b> issues · <b>:</b> emoji · drop a text file · ⌘↵ to send</span>
+        <span className="ml-auto">
+          <Btn onClick={send} disabled={sending || busy || !text.trim()} primary small
+            title={!text.trim() ? "Write something first" : undefined}>
+            {sending ? "Sending…" : sendLabel}
+          </Btn>
+        </span>
+      </div>
     </div>
   );
 }
@@ -1399,10 +3259,103 @@ function groupOf(k: PrCheck): string {
   return parts.length > 1 ? parts.slice(0, -1).join(" / ") : "Checks";
 }
 
-function Checks({ d, onRerun, busy }: { d: PrDetail; onRerun: () => void; busy: boolean }) {
+/**
+ * One job's log, folded by its own step markers.
+ *
+ * GitHub Actions writes `##[group]` / `##[endgroup]` around each step and
+ * stamps every line with an ISO timestamp. Folding on the first and stripping
+ * the second is the difference between a wall of two thousand lines and a list
+ * of steps you can open — and the failing step opens itself, because that is
+ * the one you came for.
+ */
+function JobLog({ root, name, jobs }: { root: string; name: string; jobs: PrCheckJob[] }) {
+  // Match the check to its job by name; GitHub names them the same thing.
+  const job = useMemo(() => jobs.find((j) => j.name === name) ?? jobs.find((j) => name.includes(j.name)), [jobs, name]);
+  const [text, setText] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
+  const [openSteps, setOpenSteps] = useState<Set<number>>(new Set());
+
+  useEffect(() => {
+    if (!open || !job || text !== null) return;
+    let live = true;
+    api.prJobLog(root, job.id)
+      .then((r) => { if (!live) return; if (r.ok) setText(r.text ?? ""); else setErr(r.error || "Could not read the log"); })
+      .catch(() => { if (live) setErr("Could not reach the server"); });
+    return () => { live = false; };
+  }, [open, job, root, text]);
+
+  const steps = useMemo(() => {
+    if (!text) return [];
+    const out: { title: string; lines: string[]; failed: boolean }[] = [];
+    let cur: { title: string; lines: string[]; failed: boolean } | null = null;
+    for (const raw of text.split("\n")) {
+      // Strip the timestamp GitHub prefixes to every single line.
+      const line = raw.replace(/^\uFEFF?\d{4}-\d\d-\d\dT[\d:.]+Z\s?/, "");
+      const g = line.match(/^##\[group\](.*)$/);
+      if (g) { if (cur) out.push(cur); cur = { title: g[1] || "step", lines: [], failed: false }; continue; }
+      if (/^##\[endgroup\]/.test(line)) { if (cur) { out.push(cur); cur = null; } continue; }
+      const target = cur ?? (out[out.length - 1] && !cur ? null : null);
+      if (/^##\[error\]/.test(line) && cur) cur.failed = true;
+      if (cur) cur.lines.push(line);
+      else if (line.trim()) {
+        if (!out.length || out[out.length - 1]!.title !== "output") out.push({ title: "output", lines: [], failed: false });
+        out[out.length - 1]!.lines.push(line);
+        if (/^##\[error\]/.test(line)) out[out.length - 1]!.failed = true;
+      }
+      void target;
+    }
+    if (cur) out.push(cur);
+    return out;
+  }, [text]);
+
+  // The failing step opens itself.
+  useEffect(() => {
+    const bad = steps.findIndex((st) => st.failed);
+    if (bad >= 0) setOpenSteps((cur) => (cur.has(bad) ? cur : new Set([...cur, bad])));
+  }, [steps]);
+
+  if (!job) return null;
+  return (
+    <div className="px-2.5 pb-2">
+      <button onClick={() => setOpen((v) => !v)} className="agx-btn text-[10px] px-2 py-0.5 rounded"
+        style={{ color: "var(--text2)", border: "1px solid color-mix(in srgb, var(--border) 50%, transparent)" }}>
+        {open ? "▾ Hide log" : "▸ Show log"}
+      </button>
+      {open && (
+        <div className="mt-1.5 rounded overflow-hidden" style={{ border: "1px solid color-mix(in srgb, var(--border) 30%, transparent)" }}>
+          {err ? <div className="p-2 text-[10.5px]" style={{ color: "var(--error)" }}>{err}</div>
+            : text === null ? <div className="p-2 text-[10.5px]" style={{ color: "var(--text3)" }}>Reading the log…</div>
+            : steps.length === 0 ? <div className="p-2 text-[10.5px]" style={{ color: "var(--text3)" }}>The log is empty.</div>
+            : steps.map((st, i) => {
+              const on = openSteps.has(i);
+              return (
+                <div key={i} style={i ? { borderTop: "1px solid color-mix(in srgb, var(--border) 18%, transparent)" } : undefined}>
+                  <button onClick={() => setOpenSteps((c) => { const n = new Set(c); if (n.has(i)) n.delete(i); else n.add(i); return n; })}
+                    className="agx-btn w-full text-left flex items-center gap-2 px-2 py-1 text-[10.5px]"
+                    style={{ background: st.failed ? "color-mix(in srgb, var(--error) 10%, transparent)" : "transparent" }}>
+                    <span className="text-[9px]" style={{ color: "var(--text3)" }}>{on ? "▾" : "▸"}</span>
+                    <span className="truncate" style={{ color: st.failed ? "var(--error)" : "var(--text2)" }}>{st.title}</span>
+                    <span className="ml-auto tabular-nums text-[9.5px]" style={{ color: "var(--text3)" }}>{st.lines.length}</span>
+                  </button>
+                  {on && (
+                    <pre className="overflow-x-auto text-[10px] max-h-80 agx-scroll px-2 py-1"
+                      style={{ ...CODE_FONT_STYLE, color: "var(--text3)", background: "var(--bg)" }}>{st.lines.join("\n")}</pre>
+                  )}
+                </div>
+              );
+            })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Checks({ d, root, jobs, onRerun, onRerunJobs, onAsk, busy }: { d: PrDetail; root: string; jobs: PrCheckJob[]; onRerun: () => void; onRerunJobs?: (what: "all" | "failed" | "job", id: string) => void; onAsk?: (check: PrCheck) => void; busy: boolean }) {
   const c = d.checks;
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const [showSkipped, setShowSkipped] = useState(false);
+  const [openCheck, setOpenCheck] = useState<string | null>(null);
 
   const groups = useMemo(() => {
     const m = new Map<string, PrCheck[]>();
@@ -1461,17 +3414,53 @@ function Checks({ d, onRerun, busy }: { d: PrDetail; onRerun: () => void; busy: 
               {good > 0 && <span style={{ color: "var(--success)" }}>{good} ✓</span>}
               <span className="ml-auto tabular-nums" style={{ color: "var(--text3)" }}>{list.length}</span>
             </button>
-            {isOpen && list.map((k, i) => (
-              <div key={`${k.name}-${i}`} className="flex items-center gap-2 px-2.5 py-1"
-                style={{ borderTop: "1px solid color-mix(in srgb, var(--border) 16%, transparent)" }}>
-                <span className="shrink-0 w-3 text-center" style={{ color: CHECK_TINT[k.state] }}>{CHECK_GLYPH[k.state]}</span>
-                <span className="truncate" style={{ color: k.state === "skipped" || k.state === "neutral" ? "var(--text3)" : "var(--text2)" }}>
-                  {k.name.startsWith(name) ? k.name.slice(name.length).replace(/^\s*\/\s*/, "") || k.name : k.name}
-                </span>
-                <span className="ml-auto shrink-0 text-[9.5px] uppercase tracking-wide" style={{ color: CHECK_TINT[k.state] }}>{k.state}</span>
-                {k.url && <a href={k.url} target="_blank" rel="noreferrer noopener" className="shrink-0 text-[10px]" style={{ color: "var(--text3)" }}>Log ↗</a>}
-              </div>
-            ))}
+            {isOpen && list.map((k, i) => {
+              const bad = k.state === "failure";
+              const id = `${name}::${k.name}::${i}`;
+              const expanded = bad && openCheck === id;
+              return (
+                <div key={id} style={{ borderTop: "1px solid color-mix(in srgb, var(--border) 16%, transparent)", background: bad ? "color-mix(in srgb, var(--error) 7%, transparent)" : undefined }}>
+                  {/* A failing check is the one row on this tab you came for, so
+                      it is the one row that opens into somewhere to go next. */}
+                  <button onClick={() => bad && setOpenCheck(expanded ? null : id)} disabled={!bad}
+                    className="w-full text-left flex items-center gap-2 px-2.5 py-1" style={{ cursor: bad ? "pointer" : "default" }}>
+                    <span className="shrink-0 w-3 text-center" style={{ color: CHECK_TINT[k.state] }}>{CHECK_GLYPH[k.state]}</span>
+                    <span className="truncate" style={{ color: k.state === "skipped" || k.state === "neutral" ? "var(--text3)" : "var(--text2)" }}>
+                      {k.name.startsWith(name) ? k.name.slice(name.length).replace(/^\s*\/\s*/, "") || k.name : k.name}
+                    </span>
+                    <span className="ml-auto shrink-0 text-[9.5px] uppercase tracking-wide" style={{ color: CHECK_TINT[k.state] }}>{k.state}</span>
+                    {bad && <span className="shrink-0" style={{ color: "var(--text3)" }}>{expanded ? "▾" : "▸"}</span>}
+                  </button>
+                  {expanded && (
+                    <div className="flex items-center gap-1.5 flex-wrap px-2.5 pb-2 pt-0.5">
+                      {onAsk && <Btn onClick={() => onAsk(k)} primary small title="Check the pull request out locally and hand the failure to Claude">✦ Ask Claude why</Btn>}
+                      {k.url && (
+                        <a href={externalUrl(k.url)} target="_blank" rel="noreferrer noopener" className="agx-btn text-[10px] px-2 py-0.5 rounded"
+                          style={{ color: "var(--text2)", border: "1px solid color-mix(in srgb, var(--border) 50%, transparent)" }}>Open run ↗</a>
+                      )}
+                      <Btn onClick={onRerun} disabled={busy} small title="Re-run every failing check on this pull request">↻ Re-run failed</Btn>
+                      {/* GitHub offers all three, and "the whole run failed
+                          again for one flaky job" is exactly when you want the
+                          single-job one. */}
+                      {(() => {
+                        const job = jobs.find((j) => j.name === k.name) ?? jobs.find((j) => k.name.includes(j.name));
+                        if (!job || !onRerunJobs) return null;
+                        return (
+                          <>
+                            <Btn onClick={() => onRerunJobs("job", job.id)} disabled={busy} small title={`Re-run only ${job.name}`}>↻ This job</Btn>
+                            <Btn onClick={() => onRerunJobs("all", job.runId)} disabled={busy} small title="Re-run every job in this run, passing ones included">↻ All jobs</Btn>
+                          </>
+                        );
+                      })()}
+                    </div>
+                  )}
+                  {/* The log, here. It used to say "the log lives on GitHub" and
+                      send you to a browser for the one thing you opened the
+                      check to read. */}
+                  {expanded && <JobLog root={root} name={k.name} jobs={jobs} />}
+                </div>
+              );
+            })}
           </div>
         );
       })}
@@ -1542,7 +3531,7 @@ function ReviewTab({ d, drafts, seen, busy, onDrop, onSubmit, onGoFiles }: {
               {drafts.map((c, i) => (
                 <div key={i} className="flex items-start gap-2 px-2.5 py-1.5 text-[11px]"
                   style={{ borderTop: "1px solid color-mix(in srgb, var(--border) 18%, transparent)" }}>
-                  <span className="shrink-0" style={{ ...CODE_FONT_STYLE, color: "var(--primary)" }}>{c.path.split("/").pop()}:{c.line}</span>
+                  <span className="shrink-0" style={{ ...CODE_FONT_STYLE, color: "var(--primary)" }}>{c.path.split("/").pop()}:{c.startLine && c.startLine !== c.line ? `${c.startLine}-${c.line}` : c.line}</span>
                   <span className="min-w-0 flex-1" style={{ color: "var(--text2)" }}>{c.body}</span>
                   <button onClick={() => onDrop(i)} className="shrink-0 text-[10px]" style={{ color: "var(--error)" }}>Drop</button>
                 </div>
@@ -1554,6 +3543,36 @@ function ReviewTab({ d, drafts, seen, busy, onDrop, onSubmit, onGoFiles }: {
               use “+ Comment” on a hunk to attach one to a line.
             </div>
           )}
+
+          {/* The verdict, chosen before the note is written — it is what the
+              note is for, and each option says what submitting it does rather
+              than leaving you to infer it from one word. */}
+          <div className="grid gap-1.5" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(168px, 1fr))" }}>
+            {([
+              ["approve", "✓ Approve", "Submit and mark the pull request approved.", "var(--success)"],
+              ["request_changes", "✕ Request changes", "Submit and block the merge until they land.", "var(--error)"],
+              ["comment", "💬 Comment", "Submit without a verdict.", "var(--text)"],
+            ] as const).map(([id, label, hint, tint]) => {
+              const on = verb === id;
+              const off = id !== "comment" && d.viewerDidAuthor;
+              return (
+                <button key={id} onClick={() => setVerb(id)} disabled={off}
+                  aria-pressed={on}
+                  title={off ? "GitHub does not let you approve or block your own pull request" : undefined}
+                  className="agx-btn text-left rounded-lg px-2.5 py-2"
+                  style={{
+                    border: `1px solid color-mix(in srgb, ${on ? "var(--primary) 70%" : "var(--border) 42%"}, transparent)`,
+                    background: on ? "color-mix(in srgb, var(--primary) 14%, transparent)" : "transparent",
+                    opacity: off ? 0.4 : 1, cursor: off ? "not-allowed" : "pointer",
+                  }}>
+                  <b className="block text-[12px]" style={{ color: tint, fontWeight: 600 }}>{label}</b>
+                  <i className="block text-[10px] not-italic mt-0.5 leading-snug" style={{ color: "var(--text3)" }}>
+                    {off ? "Not available on your own pull request" : hint}
+                  </i>
+                </button>
+              );
+            })}
+          </div>
 
           <div className="flex gap-0 text-[10.5px]" style={{ borderBottom: "1px solid color-mix(in srgb, var(--border) 25%, transparent)" }}>
             {(["write", "preview"] as const).map((m) => (
@@ -1576,26 +3595,11 @@ function ReviewTab({ d, drafts, seen, busy, onDrop, onSubmit, onGoFiles }: {
               style={{ color: "var(--text)", border: "1px solid color-mix(in srgb, var(--border) 45%, transparent)", outline: "none" }} />
           )}
 
-          <div className="flex flex-col gap-1 text-[11.5px]" style={{ color: "var(--text2)" }}>
-            {([
-              ["comment", "Comment", "General feedback without explicit approval.", "var(--text)"],
-              ["approve", "Approve", "Submit feedback and approve merging these changes.", "var(--success)"],
-              ["request_changes", "Request changes", "Submit feedback that must be addressed first.", "var(--error)"],
-            ] as const).map(([id, label, hint, tint]) => (
-              <label key={id} className="flex items-start gap-2 cursor-pointer">
-                <input type="radio" name="agx-review-verb" checked={verb === id} onChange={() => setVerb(id)}
-                  style={{ accentColor: "var(--primary)", marginTop: 3 }} />
-                <span>
-                  <b style={{ color: tint, fontWeight: 500 }}>{label}</b>
-                  <span className="block text-[10.5px]" style={{ color: "var(--text3)" }}>{hint}</span>
-                </span>
-              </label>
-            ))}
-          </div>
-
           <div className="flex items-center gap-2 pt-1">
             <span className="text-[10px]" style={{ color: "var(--text3)" }}>
-              Posted publicly to your team{drafts.length ? `, with ${drafts.length} line comment${drafts.length === 1 ? "" : "s"}` : ""}.
+              {verb !== "approve" && nothing
+                ? "Nothing to submit yet — write a note, or queue a line comment from Files."
+                : `Posted publicly to your team${drafts.length ? `, with ${drafts.length} line comment${drafts.length === 1 ? "" : "s"} — one notification, not ${drafts.length + 1}` : ""}.`}
             </span>
             <span className="ml-auto">
               <Btn onClick={() => onSubmit(verb, body)} disabled={busy || (verb !== "approve" && nothing)} primary

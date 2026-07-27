@@ -420,7 +420,10 @@ export type ControlCmd =
   | { cmd: "esc" }
   | { cmd: "open"; what: "stats" | "skills" | "search" | "help" | "palette" }
   | { cmd: "theme"; dir?: 1 | -1; name?: string }
-  | { cmd: "zoom"; dir: 1 | -1 | 0 };
+  | { cmd: "zoom"; dir: 1 | -1 | 0 }
+  /** Drive the chat view itself. Unlike the rest, this one needs the chat panel
+   *  mounted to run — see web/src/lib/chatIntent.ts. */
+  | { cmd: "chat"; do: "new" };
 
 /** WebSocket frames. */
 export type WsFrame =
@@ -921,6 +924,43 @@ export interface ChatImage {
  *  rejected downstream anyway. */
 export type ChatImageMediaType = "image/png" | "image/jpeg" | "image/gif" | "image/webp";
 
+/** How a chat's turns are actually run.
+ *
+ *  `process` — one `claude -p` per turn. Nothing is left running between turns,
+ *              so an idle chat costs nothing, and every turn pays the CLI's full
+ *              session start (measured 2.9-3.8s on a machine with MCP servers).
+ *  `tmux`    — one interactive `claude` per chat, alive in a pane on agentglass's
+ *              own tmux server. The start-up cost is paid once (same turn
+ *              measured at 1.2-1.4s), and because the pane is a real tmux
+ *              session the user can attach and carry on in their own terminal.
+ *              The trade is memory: a warm CLI is ~380MB and grows with use. */
+export type ChatEngine = "process" | "tmux";
+
+/** How hard the model is asked to think, lowest first.
+ *
+ *  The order is the whole point: this is a dial, not a set of unrelated
+ *  choices, and everything that renders it — the meter in the chat header —
+ *  reads the position from this array rather than carrying its own copy.
+ *
+ *  Taken from the CLI's own `/effort` picker. `ultracode` sits past `max` and
+ *  is described there as "xhigh + workflows", so it is last rather than
+ *  alphabetical. */
+export const CHAT_EFFORTS = ["low", "medium", "high", "xhigh", "max", "ultracode"] as const;
+export type ChatEffort = (typeof CHAT_EFFORTS)[number];
+
+/** Whether the pane engine can be offered here, and why not when it cannot.
+ *
+ *  The reason is carried rather than derived in the UI because the two causes
+ *  need different words — "tmux is not installed" is a thing the user can fix,
+ *  "not on Windows" is not. */
+export interface TmuxEngineInfo {
+  available: boolean;
+  reason: string;
+  /** The server's own default, so the toggle can show what happens if the user
+   *  never touches it. */
+  defaultOn: boolean;
+}
+
 // --- in-browser terminal (real PTY shell per repo/worktree) ------------------
 /** A ready-to-run project command surfaced in the terminal panel. */
 export interface ProjectCommand {
@@ -1082,7 +1122,34 @@ export interface PrSummary {
 export type PrMergeState =
   | "CLEAN" | "BLOCKED" | "BEHIND" | "DIRTY" | "UNSTABLE" | "DRAFT" | "HAS_HOOKS" | "UNKNOWN";
 
-export interface PrThreadComment {
+/** One emoji tally on a comment, straight from GraphQL's `reactionGroups`.
+ *  `viewerHasReacted` is what lets the button render as already-pressed. */
+export interface PrReaction {
+  /** GitHub's own name: THUMBS_UP, HEART, ROCKET, EYES, LAUGH, HOORAY, CONFUSED, THUMBS_DOWN. */
+  content: string;
+  count: number;
+  viewerHasReacted: boolean;
+}
+
+/** How GitHub labels the person who wrote a comment: OWNER, MEMBER,
+ *  COLLABORATOR, CONTRIBUTOR, FIRST_TIME_CONTRIBUTOR, NONE. Shown as the little
+ *  badge beside the name — it is how a reader weighs a review at a glance. */
+export type PrAuthorAssociation =
+  | "OWNER" | "MEMBER" | "COLLABORATOR" | "CONTRIBUTOR"
+  | "FIRST_TIME_CONTRIBUTOR" | "FIRST_TIMER" | "MANNEQUIN" | "NONE";
+
+/** What everything a person wrote carries: who, when, whether they edited it,
+ *  what standing they have, and how people reacted. */
+export interface PrAuthored {
+  reactions?: PrReaction[];
+  /** Non-null when the comment was edited after posting — GitHub shows "edited". */
+  editedAt?: string | null;
+  association?: PrAuthorAssociation;
+  /** You wrote it, so you may edit or delete it. */
+  viewerDidAuthor?: boolean;
+}
+
+export interface PrThreadComment extends PrAuthored {
   id: string;
   /** The numeric id the REST reply endpoint wants; the `id` above is a GraphQL
    *  node id and the two are not interchangeable. */
@@ -1100,6 +1167,8 @@ export interface PrThread {
   id: string;
   path: string;
   line: number | null;
+  /** The first line, when the thread covers a range. Null for one line. */
+  startLine?: number | null;
   isResolved: boolean;
   /** The code under it has changed since; usually safe to skip. */
   isOutdated: boolean;
@@ -1112,16 +1181,18 @@ export interface PrThread {
   comments: PrThreadComment[];
 }
 
-export interface PrReview {
+export interface PrReview extends PrAuthored {
   author: string;
   isBot: boolean;
   state: "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" | "DISMISSED" | "PENDING";
   body: string;
   submittedAt: string;
   url?: string;
+  /** GraphQL node id, for reacting to the review body. */
+  nodeId?: string;
 }
 
-export interface PrComment {
+export interface PrComment extends PrAuthored {
   id: number;
   author: string;
   isBot: boolean;
@@ -1131,9 +1202,31 @@ export interface PrComment {
   /** Bot noise reduced to its point — a 46KB coverage table is three numbers
    *  and 1,847 rows nobody reads. Null when nothing could be extracted. */
   digest?: string | null;
+  /** GraphQL node id — what the reaction and edit mutations take. */
+  nodeId?: string;
 }
 
-export interface PrCommit { oid: string; short: string; message: string; author: string; isMerge: boolean }
+export interface PrCommit {
+  oid: string;
+  short: string;
+  /** The subject line. */
+  message: string;
+  /** Everything after the subject — the paragraphs, the Co-authored-by
+   *  trailers, the "why". Empty for a one-line commit. */
+  body?: string;
+  author: string;
+  isMerge: boolean;
+  /** Everyone credited, not just the first: a commit written with an agent
+   *  carries a Co-authored-by trailer, and "X and claude committed" is the
+   *  honest line. Includes the author; empty falls back to `author`. */
+  authors?: string[];
+  /** When it landed, so commits can be grouped by day like GitHub does. */
+  committedAt?: string;
+  /** A valid signature earns the Verified badge. */
+  verified?: boolean;
+  /** This commit's own check rollup: SUCCESS / FAILURE / PENDING / null. */
+  checks?: "SUCCESS" | "FAILURE" | "ERROR" | "PENDING" | "EXPECTED" | null;
+}
 
 export interface PrFile {
   path: string;
@@ -1142,6 +1235,44 @@ export interface PrFile {
   status: string;
   /** Unresolved threads anchored to this file. */
   comments: number;
+  /** GitHub's own per-reviewer "viewed" tick, so marking a file read survives
+   *  leaving the panel and matches what github.com shows. */
+  viewed?: boolean;
+  /** Where it came from, when the change is a rename. */
+  previousPath?: string | null;
+}
+
+/** One entry in the conversation timeline that is not a comment: a push, a
+ *  rename, a label, a merge. GitHub renders these inline between comments, and
+ *  without them the conversation reads as if nothing happened between remarks. */
+export interface PrEvent {
+  kind:
+    | "force-push" | "commit" | "renamed" | "labeled" | "unlabeled"
+    | "assigned" | "unassigned" | "review-requested" | "review-request-removed"
+    | "ready-for-review" | "convert-to-draft" | "merged" | "closed" | "reopened"
+    | "cross-referenced" | "milestoned" | "demilestoned" | "head-ref-deleted"
+    | "auto-merge-enabled" | "auto-merge-disabled";
+  at: string;
+  actor: string;
+  /** One line of detail, already shaped for reading: the new title, the label
+   *  name, the sha pair of a force-push, the PR that referenced this one. */
+  detail?: string;
+  /** Colour for the label chip on labeled/unlabeled. */
+  tint?: string | null;
+  url?: string;
+}
+
+/** One CI job behind a check — what actually has a log, and what a single
+ *  re-run targets. */
+export interface PrCheckJob {
+  id: string;
+  runId: string;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  url: string;
 }
 
 export interface PrChecklistItem { checked: boolean; text: string }
@@ -1170,6 +1301,29 @@ export interface PrDetail extends PrSummary {
   viewerDidAuthor: boolean;
   /** Somebody asked you for a review. This is what the review tab is for. */
   viewerRequested: boolean;
+  /** Everything that happened which is not a comment: pushes, renames, labels,
+   *  the merge itself. Ascending, so it interleaves with comments by time. */
+  timeline: PrEvent[];
+  /** Everyone who has touched the conversation — the sidebar's avatar row. */
+  participants: string[];
+  /** Reactions on the pull request body itself. */
+  bodyReactions: PrReaction[];
+  /** Emoji on the body needs the PR's own node id. */
+  nodeId?: string;
+  projects: string[];
+  /** Issues this pull request closes when it merges. */
+  linkedIssues: { number: number; title: string; url: string; state: string }[];
+  /** Armed auto-merge, so the UI can offer to cancel it rather than only arm it. */
+  autoMerge?: { enabledBy: string; method: string } | null;
+  mergedBy?: string | null;
+  mergedAt?: string | null;
+  closedAt?: string | null;
+  createdAt?: string;
+  /** You may edit the title/body. */
+  viewerCanUpdate?: boolean;
+  /** What the page could not show because a list hit its page size. Silence
+   *  here used to be a lie: a hundred-and-first file simply vanished. */
+  truncated?: { files?: number; commits?: number; comments?: number; threads?: number; checks?: number };
 }
 
 export interface PrListResponse {
@@ -1187,6 +1341,13 @@ export interface PrListResponse {
   error?: string;
   /** `gh` missing or not logged in — a first-class state, not an error toast. */
   needsAuth?: boolean;
+  /** How many pull requests match, across every page. */
+  total?: number;
+  /** Another page exists after this one. */
+  hasNext?: boolean;
+  /** Opaque cursor that fetches the page after this one. */
+  cursor?: string | null;
+  pageSize?: number;
 }
 
 export interface PrActionResult { ok: boolean; error?: string; detail?: string }
@@ -1215,4 +1376,46 @@ export interface HookSetupResult {
   backup?: string;
   settingsPath: string;
   error?: string;
+}
+
+// --- remote access ----------------------------------------------------------
+
+/** An address another device could reach this machine on. */
+export interface ReachableAddress {
+  address: string;
+  /** Interface name, so "which network is this" is answerable. */
+  iface: string;
+  /** A tailnet address (CGNAT 100.64/10) rather than a plain LAN one: works
+   *  from anywhere, but only for devices already on the tailnet. */
+  tailnet: boolean;
+  /** CIDR of the local subnet, used to scope the firewall command. */
+  subnet: string | null;
+}
+
+/** The firewall most likely to be dropping traffic, and the fix. Never run by
+ *  the app: it prints the command for a human to read and paste. */
+export interface FirewallHint {
+  tool: "ufw" | "firewalld" | "nftables";
+  command: string;
+  undo: string | null;
+}
+
+/** Whether another device can reach this server, and whether one ever has. */
+export interface RemoteStatus {
+  /** Bound off loopback, so off-box traffic can arrive at all. */
+  exposed: boolean;
+  bind: string;
+  port: number;
+  /** Private-network origins accepted. An exposed port without it 403s. */
+  trustLan: boolean;
+  tokenRequired: boolean;
+  /** This port serves the dashboard itself, not only the API. */
+  webUi: boolean;
+  /** Ready-to-open URLs, token included when the caller is local. */
+  urls: string[];
+  addresses: ReachableAddress[];
+  clients: { count: number; lastAt: number | null; addresses: string[] };
+  firewall: FirewallHint | null;
+  /** Only ever sent to a caller on this machine. */
+  token?: string;
 }

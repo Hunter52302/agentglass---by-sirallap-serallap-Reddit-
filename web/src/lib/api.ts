@@ -1,6 +1,7 @@
-import type { WatchEvent, SessionRollup, StatsSummary, SkillInfo, FileChange, DiffHunk, Insight, SearchHit, PendingGate, GateRecord, SessionDetail, GitStatusResponse, CommitResult, WalkthroughResult, WalkthroughInputFile, GitRepoRef, FsCompletion, WorkingTree, GitActionResult, GitBranch, GitCommit, GitStash, GitGraphLine, GitWorktree, WorktreeLeftovers, GitRemote, GitRemoteBranch, GitTag, GitReflogEntry, GitLogEntry, DockerOverview, DockerStat, DockerActionResult, DockerCapability, TerminalCommands, ChatImage, ConflictBlock, BlockChoice, UpdateStatus, ReleaseNotes, PrListResponse, PrDetail, PrActionResult, GitCapability, HookSetupStatus, HookSetupResult } from "../../../shared/types.ts";
+import type { WatchEvent, SessionRollup, StatsSummary, SkillInfo, FileChange, DiffHunk, Insight, SearchHit, PendingGate, GateRecord, SessionDetail, GitStatusResponse, CommitResult, WalkthroughResult, WalkthroughInputFile, GitRepoRef, FsCompletion, WorkingTree, GitActionResult, GitBranch, GitCommit, GitStash, GitGraphLine, GitWorktree, WorktreeLeftovers, GitRemote, GitRemoteBranch, GitTag, GitReflogEntry, GitLogEntry, DockerOverview, DockerStat, DockerActionResult, DockerCapability, TerminalCommands, ChatImage, ConflictBlock, BlockChoice, UpdateStatus, ReleaseNotes, PrListResponse, PrDetail, PrActionResult, GitCapability, HookSetupStatus, HookSetupResult, PrCheckJob, ChatEngine, TmuxEngineInfo, ChatEffort, RemoteStatus } from "../../../shared/types.ts";
 import type { EnvTierStatus, EnvSummary, EnvRuntime, EnvConnection, EnvEvent, FsMap, ActorLane, SuspectRollup, EnvTier, RedlineRuleInput, RedlineStatus, KillableGate, ReplayBounds, ReplayState, PtyShell } from "../../../shared/env.ts";
 import type { ImpactProfile, ImpactSettings, ImpactSummary } from "../../../shared/impact.ts";
+import { DEPS, type DepsResponse } from "../../../shared/deps.ts";
 import * as demo from "./demo.ts";
 import { clientIdentityHeaders } from "./clientIdentity.ts";
 
@@ -30,7 +31,7 @@ const PAGE_LOCATION =
     ? location
     : { origin: "http://localhost:4000", hostname: "localhost" };
 
-export const SERVER: string =
+export let SERVER: string =
   (import.meta.env.VITE_CW_SERVER as string | undefined)?.replace(/\/$/, "") ||
   DESKTOP_API?.replace(/\/$/, "") ||
   (SERVED_BY_API ? PAGE_LOCATION.origin : `http://${PAGE_LOCATION.hostname}:4000`);
@@ -100,7 +101,7 @@ export async function probeServer(timeoutMs = 2500): Promise<ServerIdentity> {
  *  once from `?token=` — then stripped from the URL bar so it isn't shoulder-
  *  surfed or copied around — or from a prior localStorage save. Empty on the
  *  usual local box, where every call below is a no-op passthrough. */
-const TOKEN: string = (() => {
+let TOKEN: string = (() => {
   try {
     const u = new URL(location.href);
     const fromUrl = u.searchParams.get("token");
@@ -110,8 +111,17 @@ const TOKEN: string = (() => {
       history.replaceState(null, "", u.pathname + u.search + u.hash);
       return fromUrl;
     }
-    return localStorage.getItem("agentglass_token") || "";
-  } catch { return ""; }
+    const saved = localStorage.getItem("agentglass_token");
+    if (saved) return saved;
+  } catch { /* no URL, no storage — fall through to the shell */ }
+  // Inside the desktop app, the shell knows the token because it is the thing
+  // that minted it (turning on remote access). Nobody should have to paste a
+  // secret into an app running on the same machine that generated it.
+  try {
+    return (window as unknown as { agentglass?: { apiToken?: string | null } }).agentglass?.apiToken || "";
+  } catch {
+    return "";
+  }
 })();
 
 /** Attach the bearer token to fetch headers when one is configured. */
@@ -187,7 +197,36 @@ export function reauthPrompt(): void {
   }
 }
 
-export const WS_URL = withToken(SERVER.replace(/^http/, "ws") + "/stream");
+export let WS_URL = withToken(SERVER.replace(/^http/, "ws") + "/stream");
+
+/**
+ * Point this client at a (possibly new) server, without reloading the page.
+ *
+ * Turning remote access on or off, and revoking a link, all restart the sidecar
+ * with a different environment: it may come back on another port, and it comes
+ * back demanding a token the page did not have when it loaded. The obvious way
+ * to deal with that is to reload the window, which is what this replaced — and
+ * reloading the whole cockpit because a setting changed is a jarring answer to
+ * a small question. Terminals, drafts and scroll positions are not worth a
+ * rotated secret.
+ *
+ * `SERVER`, `TOKEN` and `WS_URL` are live bindings for exactly this reason:
+ * every consumer reads them at call time, so the next fetch and the next socket
+ * connect go to the right place with the right credential.
+ */
+export function adoptServer(next: { origin?: string | null; token?: string | null }): void {
+  if (next.origin) SERVER = next.origin.replace(/\/$/, "");
+  if (next.token !== undefined) {
+    TOKEN = next.token ?? "";
+    // Keep storage in step, so a genuine reload later does not fall back to a
+    // secret that has been revoked.
+    try {
+      if (TOKEN) localStorage.setItem("agentglass_token", TOKEN);
+      else localStorage.removeItem("agentglass_token");
+    } catch { /* private mode */ }
+  }
+  WS_URL = withToken(SERVER.replace(/^http/, "ws") + "/stream");
+}
 
 /** WebSocket URL for a real PTY shell in `root` (the in-browser terminal). */
 export const ptyWsUrl = (root: string, cols: number, rows: number) =>
@@ -298,6 +337,10 @@ const realApi = {
   fsComplete: (prefix: string) => get<FsCompletion>(`/fs/complete?prefix=${encodeURIComponent(prefix)}`),
   // --- live git panel (lazygit-style) ---
   gitCapability: () => get<GitCapability>("/git/capability"),
+  /** Every outside tool the app shells out to, and what this machine has.
+   *  `force` is the Recheck button: it re-probes inside the server's cache
+   *  window, which is the only case where a stale answer is the wrong one. */
+  dependencies: (force = false) => get<DepsResponse>(`/dependencies${force ? "?force=1" : ""}`),
   gitRepos: () => get<{ repos: GitRepoRef[] }>("/git/repos"),
   /** Every repo on the machine — for the project picker, even when scoped. */
   gitReposAll: () => get<{ repos: GitRepoRef[] }>("/git/repos?all=1"),
@@ -387,6 +430,9 @@ const realApi = {
   dockerOverview: () => get<DockerOverview>("/docker/overview"),
   dockerStats: () => get<{ stats: DockerStat[] }>("/docker/stats"),
   dockerLogs: (id: string, tail = 400) => get<{ ok: boolean; text: string; error?: string }>(`/docker/logs?id=${encodeURIComponent(id)}&tail=${tail}`),
+  /** Where this server is reachable from another device, whether one has
+   *  arrived, and which firewall is the likely reason if none has. */
+  remoteStatus: () => get<RemoteStatus>("/remote/status"),
   updateStatus: () => get<UpdateStatus>("/update/status"),
   // The tag is optional because the automatic modal wants "whatever this build
   // came from", while About asks for a named release — the update it is about
@@ -403,8 +449,56 @@ const realApi = {
   dockerTop: (id: string) => get<{ ok: boolean; text: string; error?: string }>(`/docker/top?id=${encodeURIComponent(id)}`),
   // --- pull requests (gh-backed) ---
   prCapability: (force = false) => get<{ available: boolean; authed: boolean; login?: string; reason?: string }>(`/prs/capability${force ? "?force=1" : ""}`),
-  prList: (root: string, filter: "mine" | "review" | "all", force = false) =>
-    get<PrListResponse>(`/prs/list?root=${encodeURIComponent(root)}&filter=${filter}${force ? "&force=1" : ""}`),
+  /** Emoji on anything: the body, a comment, a review, a line comment. `nodeId`
+   *  is the GraphQL id, and `on:false` takes the reaction back off. */
+  prReactTo: (root: string, nodeId: string, content: string, on: boolean) =>
+    post<PrActionResult>("/prs/react", { root, nodeId, content, on }),
+  prEditComment: (root: string, nodeId: string, body: string, kind: "issue" | "review" = "issue") =>
+    post<PrActionResult>("/prs/comment-edit", { root, nodeId, body, kind }),
+  prDeleteComment: (root: string, nodeId: string, kind: "issue" | "review" = "issue") =>
+    post<PrActionResult>("/prs/comment-delete", { root, nodeId, kind }),
+  /** GitHub's own viewed tick, so it survives leaving the panel. */
+  prFileViewed: (root: string, prNodeId: string, path: string, viewed: boolean) =>
+    post<PrActionResult>("/prs/file-viewed", { root, prNodeId, path, viewed }),
+  prAssignees: (root: string, number: number, add: string[], remove: string[]) =>
+    post<PrActionResult>("/prs/assignees", { root, number, add, remove }),
+  prMilestone: (root: string, number: number, title: string) =>
+    post<PrActionResult>("/prs/milestone", { root, number, title }),
+  prList: (root: string, filter: "mine" | "review" | "all", state: "open" | "closed" | "all" = "open", force = false, after?: string, q?: string) =>
+    get<PrListResponse>(`/prs/list?root=${encodeURIComponent(root)}&filter=${filter}&state=${state}${force ? "&force=1" : ""}${after ? `&after=${encodeURIComponent(after)}` : ""}${q ? `&q=${encodeURIComponent(q)}` : ""}`),
+  /** Apply a suggested change: reads the file, splices the lines, commits. */
+  prApplySuggestion: (root: string, number: number, a: { path: string; startLine?: number; line: number; suggestion: string; author?: string }) =>
+    post<PrActionResult>("/prs/apply-suggestion", { root, number, ...a }),
+  /** A slice of a file at one side — for expanding diff context, and for the
+   *  bytes of a binary the diff cannot carry. */
+  prFileSlice: (root: string, number: number, path: string, side: "LEFT" | "RIGHT", from?: number, to?: number) =>
+    get<{ ok: boolean; lines?: string[]; start?: number; total?: number; binary?: boolean; url?: string; error?: string }>(
+      `/prs/file-slice?root=${encodeURIComponent(root)}&number=${number}&path=${encodeURIComponent(path)}&side=${side}${from ? `&from=${from}` : ""}${to ? `&to=${to}` : ""}`),
+  /** What the facet menus can offer — from the repository, not the page. */
+  prFacets: (root: string) =>
+    get<{ ok: boolean; data?: { authors: string[]; assignees: string[]; labels: { name: string; color: string }[]; milestones: string[]; bases: string[] }; error?: string }>(
+      `/prs/facets?root=${encodeURIComponent(root)}`),
+  /** Who `@` can complete to, and which issues `#` can. */
+  prMentions: (root: string) =>
+    get<{ ok: boolean; data?: { users: string[]; issues: { number: number; title: string }[] }; error?: string }>(
+      `/prs/mentions?root=${encodeURIComponent(root)}`),
+  /** One line comment, posted on its own — no review, no verdict. */
+  prLineComment: (root: string, number: number, c: { path: string; line: number; startLine?: number; side?: "LEFT" | "RIGHT"; body: string }) =>
+    post<PrActionResult>("/prs/line-comment", { root, number, ...c }),
+  /** One CI job's log, read in the app instead of sending you to a browser. */
+  prJobLog: (root: string, job: string) =>
+    get<{ ok: boolean; text?: string; truncated?: boolean; error?: string }>(
+      `/prs/job-log?root=${encodeURIComponent(root)}&job=${encodeURIComponent(job)}`),
+  prCheckJobs: (root: string, number: number) =>
+    get<{ ok: boolean; jobs?: PrCheckJob[]; error?: string }>(
+      `/prs/check-jobs?root=${encodeURIComponent(root)}&number=${number}`),
+  /** Re-run everything, only the failures, or a single job. */
+  prRerunJobs: (root: string, what: "all" | "failed" | "job", id: string) =>
+    post<PrActionResult>("/prs/rerun-jobs", { root, what, id }),
+  /** Exact totals for every saved view, in one request. */
+  prCounts: (root: string, state: "open" | "closed" | "all") =>
+    get<{ ok: boolean; counts?: { review: number; mine: number; failing: number; ready: number; all: number }; error?: string }>(
+      `/prs/counts?root=${encodeURIComponent(root)}&state=${state}`),
   prDetail: (root: string, number: number, force = false) =>
     get<{ ok: boolean; detail?: PrDetail; error?: string }>(`/prs/detail?root=${encodeURIComponent(root)}&number=${number}${force ? "&force=1" : ""}`),
   prDiff: (root: string, number: number) =>
@@ -421,7 +515,7 @@ const realApi = {
    *  request — GitHub's "pending review", which arrives as one notification
    *  instead of a scatter. */
   prReviewWith: (root: string, number: number, verb: "approve" | "request_changes" | "comment", body: string,
-    comments: { path: string; line: number; side?: "LEFT" | "RIGHT"; body: string }[]) =>
+    comments: { path: string; line: number; startLine?: number; side?: "LEFT" | "RIGHT"; startSide?: "LEFT" | "RIGHT"; body: string }[]) =>
     post<PrActionResult>("/prs/review-with", { root, number, verb, body, comments }),
   prComment: (root: string, number: number, body: string) => post<PrActionResult>("/prs/comment", { root, number, body }),
   prReply: (root: string, number: number, commentId: number, body: string) => post<PrActionResult>("/prs/reply", { root, number, commentId, body }),
@@ -433,12 +527,13 @@ const realApi = {
   prDraft: (root: string, number: number, draft: boolean) => post<PrActionResult>("/prs/draft", { root, number, draft }),
   prUpdateBranch: (root: string, number: number) => post<PrActionResult>("/prs/update-branch", { root, number }),
   prRerun: (root: string, number: number) => post<PrActionResult>("/prs/rerun", { root, number }),
-  prMerge: (root: string, number: number, method: "squash" | "merge" | "rebase", opts: { deleteBranch?: boolean; auto?: boolean; headSha?: string }) =>
+  prMerge: (root: string, number: number, method: "squash" | "merge" | "rebase", opts: { deleteBranch?: boolean; auto?: boolean; headSha?: string; subject?: string; body?: string; disableAuto?: boolean }) =>
     post<PrActionResult>("/prs/merge", { root, number, method, ...opts }),
   prClose: (root: string, number: number, reopen = false) => post<PrActionResult>("/prs/close", { root, number, reopen }),
-  prLocalReview: (root: string, number: number) =>
-    post<{ ok: boolean; cwd?: string; prompt?: string; branch?: string; error?: string }>("/prs/local-review", { root, number }),
-  prLocalReviewDiscard: (root: string, number: number) => post<PrActionResult>("/prs/local-review-discard", { root, number }),
+  /** The prompt to review a PR with Claude, and the directory to run it in.
+   *  Reads only: no fetch, no checkout, nothing left behind. */
+  prReviewPrompt: (root: string, number: number) =>
+    post<{ ok: boolean; cwd?: string; prompt?: string; branch?: string; error?: string }>("/prs/review-prompt", { root, number }),
   /** Where a local branch lives on the web. A live branch resolves to its tree
    *  with no network at all; a gone one resolves to the PR it came from. */
   prCommitDiff: (root: string, sha: string) =>
@@ -450,8 +545,19 @@ const realApi = {
   // --- in-browser terminal: ready-to-run project commands (make + scripts) ---
   terminalCommands: (root: string) => get<TerminalCommands>(`/terminal/commands?root=${encodeURIComponent(root)}`),
   // --- multi-chat: drive a claude session from the browser ---
-  chatEnabled: () => get<{ enabled: boolean; bypass?: boolean }>("/chat/enabled"),
-  chatStream: async (payload: { cwd: string; message: string; model: string; mode: string; resumeId: string; allowedTools?: string[]; images?: ChatImage[] }, onEvent: (o: Record<string, unknown>) => void, signal?: AbortSignal) => {
+  chatEnabled: () => get<{ enabled: boolean; bypass?: boolean; tmuxEngine?: TmuxEngineInfo }>("/chat/enabled"),
+  /** The command that hands a chat to the user's own terminal, and whether its
+   *  pane is up right now. Assembled server-side so the socket name never has to
+   *  be duplicated here. */
+  chatAttach: (session: string) => get<{ command: string; live: boolean }>(`/chat/attach?session=${encodeURIComponent(session)}`),
+  /** Give a chat's warm CLI back. Destroys no conversation — the transcript
+   *  stays on disk and resuming relaunches the pane with `--resume`. */
+  chatPaneClose: (session: string) => post<{ killed: boolean }>("/chat/pane/close", { session }),
+  /** Press one key in a chat's pane, and get back what it shows afterwards.
+   *  Only navigation and the two answers a prompt takes — the server keeps its
+   *  own allowlist, since this reaches a live terminal running an agent. */
+  chatPaneKey: (session: string, key: string) => post<{ screen: string }>("/chat/pane/key", { session, key }),
+  chatStream: async (payload: { cwd: string; message: string; model: string; mode: string; resumeId: string; allowedTools?: string[]; images?: ChatImage[]; engine?: ChatEngine; effort?: ChatEffort }, onEvent: (o: Record<string, unknown>) => void, signal?: AbortSignal) => {
     let res: Response;
     // A fetch that throws before a response has arrived never reached the
     // server, which is a different problem from one that dies mid-turn — the
@@ -592,6 +698,12 @@ const demoApi: typeof realApi = {
   // The demo has no filesystem to browse, so completion is simply always empty.
   fsComplete: (_prefix: string) => D({ base: "", entries: [], truncated: false }),
   gitCapability: () => D({ available: true } as GitCapability),
+  // The demo runs no local processes, so it has nothing to probe. The catalog
+  // is still the honest thing to show: it is what the real app would check.
+  dependencies: (_force = false) => D({
+    platform: "demo",
+    deps: DEPS.map((d) => ({ ...d, status: "unsupported" as const, detail: "the demo runs no local processes, so nothing here is probed" })),
+  } as DepsResponse),
   gitRepos: () => D(demo.gitRepos()),
   gitReposAll: () => D(demo.gitRepos()),
   gitTree: (root: string) => D(demo.gitTree(root)),
@@ -653,6 +765,7 @@ const demoApi: typeof realApi = {
   dockerStats: () => D(demo.dockerStats()),
   dockerLogs: (id: string, _tail?: number) => D(demo.dockerLogs(id)),
   updateNotes: (_tag?: string) => D({ ok: false, tag: "", notes: "", source: "", error: "not available in the demo" } as ReleaseNotes),
+  remoteStatus: () => D({ exposed: false, bind: "127.0.0.1", port: 4000, trustLan: false, tokenRequired: false, webUi: true, urls: [], addresses: [], clients: { count: 0, lastAt: null, addresses: [] }, firewall: null } as RemoteStatus),
   updateStatus: () => D({ ok: true, available: false, info: { version: "demo", commit: "", builtAt: "", source: "", origin: "", baseTag: "", distance: 0 }, branch: "", behind: 0, ahead: 0, incoming: [], blocked: "not available in the demo" } as UpdateStatus),
   updateRun: () => D({ ok: false, error: "not available in the demo" }),
   hooksStatus: () => D({ installed: false, bundled: false, settingsPath: "~/.claude/settings.json", python: "python3" } as HookSetupStatus),
@@ -662,8 +775,11 @@ const demoApi: typeof realApi = {
   dockerInspect: (_id: string) => D({ ok: false, env: [] as string[], config: "", error: "not available in the demo" }),
   dockerTop: (_id: string) => D({ ok: false, text: "", error: "not available in the demo" }),
   terminalCommands: (_root: string) => D({ enabled: false, make: [], scripts: [] } as TerminalCommands),
-  chatEnabled: () => D({ enabled: false }),
-  chatStream: async (_payload: { cwd: string; message: string; model: string; mode: string; resumeId: string; allowedTools?: string[]; images?: ChatImage[] }, onEvent: (o: Record<string, unknown>) => void) => {
+  chatEnabled: () => D({ enabled: false, tmuxEngine: { available: false, reason: "the demo runs no local processes", defaultOn: false } }),
+  chatAttach: (_session: string) => D({ command: "", live: false }),
+  chatPaneClose: (_session: string) => D({ killed: false }),
+  chatPaneKey: (_session: string, _key: string) => D({ screen: "" }),
+  chatStream: async (_payload: { cwd: string; message: string; model: string; mode: string; resumeId: string; allowedTools?: string[]; images?: ChatImage[]; engine?: ChatEngine; effort?: ChatEffort }, onEvent: (o: Record<string, unknown>) => void) => {
     onEvent({ type: "system", subtype: "init", session_id: "demo" });
     onEvent({ type: "assistant", message: { content: [{ type: "text", text: "(chat is disabled in the demo — run agentglass locally to drive real Claude sessions)" }] } });
     onEvent({ type: "result", result: "" });
@@ -677,11 +793,21 @@ const demoApi: typeof realApi = {
   // fake PR list in front of someone evaluating the app. It reports the same
   // "gh isn't set up" state a real machine without gh would, which is honest
   // and is a screen worth showing anyway.
-  prCapability: (_force?: boolean) => D({ available: false, authed: false, reason: "pull requests need the GitHub CLI — not available in the demo" }),
-  prList: (_root: string, _filter: "mine" | "review" | "all", _force?: boolean) =>
-    D<PrListResponse>({ ok: true, repo: null, prs: [], fetchedAt: 0, stale: false, loading: false, needsAuth: true, error: "not available in the demo" }),
-  prDetail: (_root: string, _number: number, _force?: boolean) => D({ ok: false, error: "not available in the demo" }),
-  prDiff: (_root: string, _number: number) => D({ ok: false, error: "not available in the demo" }),
+  // The panel used to answer available:false here, so the feature the landing
+  // page calls out as new was dead in the demo that page links to.
+  prCapability: (_force?: boolean) => D(demo.prCapability()),
+  prApplySuggestion: () => D(demoPrAction()),
+  prFileSlice: () => D({ ok: false, error: "not available in the demo" } as { ok: boolean; lines?: string[]; start?: number; total?: number; binary?: boolean; url?: string; error?: string }),
+  prFacets: () => D({ ok: false, error: "not available in the demo" } as { ok: boolean; data?: { authors: string[]; assignees: string[]; labels: { name: string; color: string }[]; milestones: string[]; bases: string[] }; error?: string }),
+  prList: (root: string, filter: "mine" | "review" | "all", _state?: "open" | "closed" | "all", _force?: boolean, _after?: string, _q?: string) => D<PrListResponse>(demo.prList(root, filter)),
+  prMentions: () => D({ ok: false, error: "not available in the demo" } as { ok: boolean; data?: { users: string[]; issues: { number: number; title: string }[] }; error?: string }),
+  prLineComment: () => D(demoPrAction()),
+  prJobLog: () => D({ ok: false, error: "not available in the demo" }),
+  prCheckJobs: () => D({ ok: false, error: "not available in the demo" } as { ok: boolean; jobs?: PrCheckJob[]; error?: string }),
+  prRerunJobs: () => D(demoPrAction()),
+  prCounts: (_r: string, _s: "open" | "closed" | "all") => D({ ok: false, error: "not available in the demo" } as { ok: boolean; counts?: { review: number; mine: number; failing: number; ready: number; all: number }; error?: string }),
+  prDetail: (_root: string, number: number, _force?: boolean) => D(demo.prDetail(number)),
+  prDiff: (_root: string, number: number) => D(demo.prDiff(number)),
   prAssetUrl: (raw: string) => raw,
   prReview: (_r: string, _n: number, _v: "approve" | "request_changes" | "comment", _b: string) => D(demoPrAction()),
   prReviewWith: (_r: string, _n: number, _v: "approve" | "request_changes" | "comment", _b: string, _c: unknown[]) => D(demoPrAction()),
@@ -689,16 +815,21 @@ const demoApi: typeof realApi = {
   prReply: (_r: string, _n: number, _c: number, _b: string) => D(demoPrAction()),
   prSetThreadResolved: (_r: string, _t: string, _v: boolean) => D(demoPrAction()),
   prReact: (_r: string, _c: number, _content?: string) => D(demoPrAction()),
+  prReactTo: (_r: string, _id: string, _c: string, _on: boolean) => D(demoPrAction()),
+  prEditComment: (_r: string, _id: string, _b: string, _k?: "issue" | "review") => D(demoPrAction()),
+  prDeleteComment: (_r: string, _id: string, _k?: "issue" | "review") => D(demoPrAction()),
+  prFileViewed: (_r: string, _p: string, _path: string, _v: boolean) => D(demoPrAction()),
+  prAssignees: (_r: string, _n: number, _a: string[], _rm: string[]) => D(demoPrAction()),
+  prMilestone: (_r: string, _n: number, _t: string) => D(demoPrAction()),
   prEdit: (_r: string, _n: number, _p: { title?: string; body?: string; base?: string }) => D(demoPrAction()),
   prLabels: (_r: string, _n: number, _a: string[], _rm: string[]) => D(demoPrAction()),
   prReviewers: (_r: string, _n: number, _a: string[], _rm: string[]) => D(demoPrAction()),
   prDraft: (_r: string, _n: number, _d: boolean) => D(demoPrAction()),
   prUpdateBranch: (_r: string, _n: number) => D(demoPrAction()),
   prRerun: (_r: string, _n: number) => D(demoPrAction()),
-  prMerge: (_r: string, _n: number, _m: "squash" | "merge" | "rebase", _o: { deleteBranch?: boolean; auto?: boolean; headSha?: string }) => D(demoPrAction()),
+  prMerge: (_r: string, _n: number, _m: "squash" | "merge" | "rebase", _o: { deleteBranch?: boolean; auto?: boolean; headSha?: string; subject?: string; body?: string; disableAuto?: boolean }) => D(demoPrAction()),
   prClose: (_r: string, _n: number, _reopen?: boolean) => D(demoPrAction()),
-  prLocalReview: (_r: string, _n: number) => D({ ok: false, error: "not available in the demo" }),
-  prLocalReviewDiscard: (_r: string, _n: number) => D(demoPrAction()),
+  prReviewPrompt: (_r: string, _n: number) => D({ ok: false, error: "not available in the demo" }),
   prCommitDiff: (_r: string, _s: string) => D({ ok: false, error: "not available in the demo" }),
   prBranchUrl: (_r: string, _b: string, _g: boolean) => D({ ok: false, error: "not available in the demo" }),
 };

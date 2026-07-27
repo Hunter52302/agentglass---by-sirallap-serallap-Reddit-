@@ -18,6 +18,12 @@ import { SCROLLBAR_CSS } from "./ChangesModal.tsx";
 export const PICKER_ANSWERED_KEY = "agentglass.projectChosen";
 const markAnswered = () => { try { localStorage.setItem(PICKER_ANSWERED_KEY, "1"); } catch { /* ignore */ } };
 
+// Mirrors isAbsoluteLike() in server/src/fsbrowse.ts: POSIX absolute (`/...`)
+// or a Windows drive-letter root (`C:\...` / `C:/...`). Kept local rather than
+// a shared import since this is the client bundle, not the server process.
+const DRIVE_LETTER_ROOT = /^[a-zA-Z]:[\\/]/;
+const isAbsoluteLike = (p: string) => p.startsWith("/") || DRIVE_LETTER_ROOT.test(p);
+
 export function ProjectPicker({ open, workspace, onClose }: { open: boolean; workspace: string | null; onClose: () => void }) {
   const [repos, setRepos] = useState<GitRepoRef[] | null>(null);
   const [query, setQuery] = useState("");
@@ -49,7 +55,7 @@ export function ProjectPicker({ open, workspace, onClose }: { open: boolean; wor
     const p = path.trim();
     // Only absolute / `~`-rooted input has a meaningful parent to list, which is
     // the same rule the server applies before it will answer at all.
-    if (!open || (!p.startsWith("/") && !p.startsWith("~"))) { setSugg([]); setMore(false); return; }
+    if (!open || (!isAbsoluteLike(p) && !p.startsWith("~"))) { setSugg([]); setMore(false); return; }
     let live = true;
     const t = setTimeout(() => {
       api.fsComplete(p)
@@ -137,7 +143,7 @@ export function ProjectPicker({ open, workspace, onClose }: { open: boolean; wor
         {open && (
           <>
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-              className="fixed inset-0" style={{ zIndex: 10000, background: "rgba(0,0,0,0.55)", backdropFilter: "blur(3px)" }} onClick={close} />
+              className="fixed inset-0 agx-scrim" style={{ zIndex: 10000 }} onClick={close} />
             <div className="fixed inset-0 flex items-center justify-center p-3 pointer-events-none" style={{ zIndex: 10001 }}>
               <motion.div
                 initial={{ opacity: 0, scale: 0.95, y: 14 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.96, y: 8 }}

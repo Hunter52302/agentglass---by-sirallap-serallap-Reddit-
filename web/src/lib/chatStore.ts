@@ -7,7 +7,9 @@
 
 import { api, ChatStreamError } from "./api.ts";
 import { loadChats, saveChats } from "./chatPersist.ts";
-import type { ChatImage, WatchEvent } from "../../../shared/types.ts";
+import { chatEnginePref } from "./chatEnginePref.ts";
+import { paneStillAsking } from "./paneScreen.ts";
+import type { ChatImage, WatchEvent, ChatEngine, ChatEffort } from "../../../shared/types.ts";
 
 /** A pasted image waiting in the composer. `url` is an object URL for the
  *  thumbnail; it is revoked when the attachment is dropped or sent, since
@@ -43,6 +45,26 @@ export function toolTarget(name: string, inp: Record<string, unknown>): string |
   return name === "Bash"
     ? strv(inp.command)
     : strv(inp.file_path) ?? strv(inp.path) ?? strv(inp.url) ?? strv(inp.query) ?? strv(inp.pattern) ?? strv(inp.description) ?? strv(inp.command);
+}
+
+/**
+ * Add a text block to what the assistant has said so far.
+ *
+ * A turn is one bubble, but the model reaches it in several frames: it says a
+ * sentence, runs a tool, says the next one. Each of those is its own complete
+ * text block, and appending them raw ran them together mid-word — "…in your
+ * screenshot.Picking it up again" — because the block that ended a thought had
+ * no reason to carry a trailing newline. Nothing was lost, but a turn's worth of
+ * separate remarks arrived as one paragraph nobody can skim.
+ *
+ * So blocks are joined the way they were meant: a blank line between them,
+ * unless the previous one already ended in a break of its own (a list, a code
+ * fence, a heading), where adding another would open a gap in the markdown.
+ */
+export function joinBlock(prev: string, next: string): string {
+  if (!prev) return next;
+  if (!next) return prev;
+  return /\n\s*$/.test(prev) ? prev + next : `${prev}\n\n${next}`;
 }
 
 export type ChatMsg = {
@@ -92,6 +114,52 @@ export type ChatUsage = {
 /** A message typed during someone else's turn, waiting for its own. */
 export type QueuedTurn = { id: string; text: string; images: ChatImage[] };
 
+/** Press one key in a chat's pane and take in what it drew next.
+ *
+ *  Lives here rather than in the panel because two things call it: the buttons
+ *  under the prompt, and the composer forwarding the real arrow keys. Those had
+ *  better behave identically — a picker that answers a click but not the key
+ *  the picker itself is telling you to press is worse than one with no buttons
+ *  at all.
+ *
+ *  Whether the prompt is over is read from the next frame rather than inferred
+ *  from the key: Enter and Escape can both end one, and some pickers stay open
+ *  after Enter. */
+export async function answerPane(id: string, key: string): Promise<void> {
+  const chat = chats.get(id);
+  if (!chat?.sessionId || !chat.paneNeedsYou) return;
+  try {
+    const r = await api.chatPaneKey(chat.sessionId, key);
+    const stillAsking = paneStillAsking(r.screen);
+    update(id, (c) => {
+      if (key === "Escape" || !stillAsking) { c.paneNeedsYou = undefined; c.attention = "none"; }
+      else c.paneNeedsYou = { screen: r.screen };
+    });
+  } catch {
+    // The pane may have been reclaimed under us. Clearing is the honest
+    // outcome: there is nothing left to answer.
+    update(id, (c) => { c.paneNeedsYou = undefined; c.attention = "none"; });
+  }
+}
+
+/** The engine this chat's next turn will actually use.
+ *
+ *  A chat with no session yet has nothing to strand, so the current preference
+ *  wins — that is what makes changing the setting take effect on the chat you
+ *  are already looking at instead of only on the next one you remember to
+ *  create. Once a session exists the answer is fixed: it lives in a pane or it
+ *  does not.
+ *
+ *  `undefined` means "whatever the server is configured to do", which is a real
+ *  third answer and not a missing one.
+ *
+ *  Shared by the send path and the header so the two can never disagree — the
+ *  header claiming one engine while the turn used the other is the bug this
+ *  whole function exists to end. */
+export function engineFor(chat: Pick<Chat, "sessionId" | "engine">): ChatEngine | undefined {
+  return chat.sessionId ? chat.engine : (chatEnginePref() ?? undefined);
+}
+
 export type Chat = {
   id: string;
   cwd: string;
@@ -104,6 +172,21 @@ export type Chat = {
    *  first turn has started. */
   resolvedModel?: string;
   mode: string;
+  /** How hard to think, passed to the CLI as `--effort`.
+   *
+   *  Absent means "leave whatever the CLI is configured with alone" — a real
+   *  answer, not a missing one: someone who set an effort in their own
+   *  settings.json should not have every chat quietly overriding it. */
+  effort?: ChatEffort;
+  /** How this chat's turns are run. Per chat rather than global because the
+   *  trade is per chat: the one you are working in all afternoon is worth a warm
+   *  CLI, the five you opened to ask one question each are not. Absent on chats
+   *  saved before the pane engine existed, which is what the server default is
+   *  for. */
+  engine?: ChatEngine;
+  /** The command that reopens this chat in the user's own terminal. Only a
+   *  `tmux` chat has one, and only after its first turn has named the session. */
+  attachCommand?: string;
   title: string;        // derived from the first message; the tab label
   messages: ChatMsg[];
   sessionId: string;    // claude's own id, for resuming
@@ -137,6 +220,11 @@ export type Chat = {
    *  `claude` that has never been logged in. Distinct from a failed turn:
    *  retrying changes nothing until the command is run. */
   setupNeeded?: { command: string; why: string };
+  /** An interactive prompt waiting in this chat's pane — a `/model` picker and
+   *  the like. Held as state rather than left as text in the reply, because it
+   *  is a thing to answer, not a thing to read: the screen redraws as keys are
+   *  sent to it. */
+  paneNeedsYou?: { screen: string };
   /** Timestamp of the newest thing already on screen from the session's own
    *  transcript. The live socket replays a window of recent events on every
    *  connect, so without a watermark reopening the panel would re-append the
@@ -194,6 +282,23 @@ export function setActiveChatId(id: string) {
   persistSoon();
 }
 
+/**
+ * Ask the panel to bring a chat to the front.
+ *
+ * The panel owns selection, so this cannot simply assign it: `setActiveChatId`
+ * records which tab is up for the next restore, and nothing was reading it back
+ * — which is how "review this PR with Claude" came to create a chat, fill its
+ * composer, and leave it behind whichever tab was already showing, looking for
+ * all the world like the button did nothing.
+ *
+ * Carries a serial so asking twice for the same tab is two requests. The second
+ * click after you wandered off to another tab means the same thing as the first
+ * one did.
+ */
+let focusReq = { id: "", n: 0 };
+export function requestChatFocus(id: string) { focusReq = { id, n: focusReq.n + 1 }; emit(); }
+export const chatFocusRequest = () => focusReq;
+
 // Restored synchronously, at module load, on purpose. The panel seeds a blank
 // chat when it opens and finds none, so a restore that resolved a tick later
 // would race that and land behind an empty tab nobody asked for.
@@ -234,6 +339,11 @@ export function newChat(
   const id = `c${++seq}-${Date.now().toString(36)}`;
   const chat: Chat = {
     id, cwd, model, mode,
+    // Chosen once, at birth. The engine decides where this chat's session lives,
+    // so switching it later would either strand a warm CLI or a live turn — the
+    // preference is a default for new chats, never a control over old ones.
+    // `undefined` defers to whatever the server was configured with.
+    engine: chatEnginePref() ?? undefined,
     title: resume?.title || "new chat",
     messages: [], sessionId: resume?.sessionId ?? "",
     sending: false, draft: "", attachments: [], queued: [], createdAt: Date.now(), abort: null, unread: false,
@@ -488,6 +598,27 @@ export function closeChat(id: string) {
   const c = chats.get(id);
   if (!c) return;
   c.abort?.abort(); // a closed tab must not keep a stream running
+  /*
+   * Give the pane engine's warm CLI back.
+   *
+   * Closing a tab is the clearest "done with this" there is, and a pane holds
+   * ~380MB for as long as it lives. Left alone it survives until the idle
+   * sweeper reaches it half an hour later, which is a long time to hold memory
+   * for a chat the user has already dismissed — and it is visible: `tmux -L
+   * agentglass ls` keeps listing sessions for chats that are gone.
+   *
+   * Done without asking because it destroys nothing. The conversation is on
+   * disk in the session's transcript; Resume brings it back and relaunches the
+   * pane with `--resume`. The only thing thrown away is the warm process, which
+   * costs one slower turn to rebuild. A confirmation for that would be a dialog
+   * on every close for a decision with no downside — the one case that DOES
+   * lose work, closing mid-turn, is confirmed by the caller instead.
+   *
+   * Fire and forget: a chat must close instantly whether or not the server is
+   * reachable, and a pane nobody reclaimed is exactly the state the idle
+   * sweeper already exists to handle.
+   */
+  if (c.sessionId && c.engine === "tmux") void api.chatPaneClose(c.sessionId).catch(() => {});
   for (const a of c.attachments) URL.revokeObjectURL(a.url);
   chats.delete(id);
   emit();
@@ -562,6 +693,10 @@ export async function send(id: string, text: string, isActive: () => boolean, al
         c.sessionId = o.session_id as string;
         c.liveFrom = Date.now();
         if (typeof o.model === "string" && o.model) c.resolvedModel = o.model;
+        // The pane engine names the session itself and sends back the command
+        // that reopens it in a terminal. Carried on the frame rather than asked
+        // for separately so the UI can offer it the moment the chat has one.
+        if (typeof o.agx_attach === "string") c.attachCommand = o.agx_attach;
       });
       return;
     }
@@ -571,10 +706,10 @@ export async function send(id: string, text: string, isActive: () => boolean, al
         const last = c.messages[c.messages.length - 1];
         if (!last || last.role !== "assistant") return;
         for (const b of blocks) {
-          if (b.type === "text" && typeof b.text === "string") last.text += b.text;
+          if (b.type === "text" && typeof b.text === "string") last.text = joinBlock(last.text, b.text);
           // Reasoning, kept apart from the answer. Streams in chunks like text.
           else if (b.type === "thinking" && typeof b.thinking === "string") {
-            last.thinking = (last.thinking ?? "") + b.thinking;
+            last.thinking = joinBlock(last.thinking ?? "", b.thinking);
           }
           else if (b.type === "tool_use" && typeof b.name === "string") {
             // The result comes back later keyed only by id, so remember which
@@ -673,6 +808,21 @@ export async function send(id: string, text: string, isActive: () => boolean, al
         // started, and it will fail identically every time until you do the one
         // thing it names. Raise it as attention so the chat says it needs you
         // rather than just going quiet.
+        // A picker in the pane is answerable from here, so it is raised as
+        // something to act on rather than appended to the reply as prose. The
+        // screen the server sent is the starting frame; each key sent back
+        // returns the next one.
+        if (o.errorType === "pane_needs_you") {
+          const text = String(o.error ?? "");
+          const screen = text.slice(text.indexOf("\n\n") + 2);
+          c.paneNeedsYou = { screen: screen.slice(screen.indexOf("\n\n") + 2) || screen };
+          c.attention = "blocked";
+          const last = c.messages[c.messages.length - 1];
+          // The prose above the screen is worth keeping; the screen itself is
+          // about to be drawn properly, so it does not belong in the text too.
+          if (last?.role === "assistant") last.text = last.text.split("\n\n")[0];
+          return;
+        }
         if (typeof o.setupCommand === "string") {
           c.setupNeeded = { command: o.setupCommand, why: String(o.error ?? "") };
           c.attention = "blocked";
@@ -681,9 +831,27 @@ export async function send(id: string, text: string, isActive: () => boolean, al
     }
   };
 
+  /*
+   * Which engine this turn runs on.
+   *
+   * Freezing it when the chat object was created was wrong in the one case that
+   * matters: the panel opens a chat for you before you have touched anything, so
+   * the chat that is already on screen when you change the preference keeps the
+   * old engine — and says nothing about it. Changing the setting then appeared
+   * to do nothing at all, which is exactly how it was first reported.
+   *
+   * So the preference wins right up until the chat has a session. After that the
+   * engine is frozen for real: the session lives in a pane or it does not, and
+   * moving a running conversation between the two would strand one or the other.
+   */
+  const engine = engineFor(chat);
+  // Recorded on the chat as the turn starts, so the header can say where this
+  // conversation runs before its first reply rather than after.
+  if (engine !== chat.engine) update(id, (c) => { c.engine = engine; });
+
   let broke = false;
   try {
-    await api.chatStream({ cwd: chat.cwd, message: msg, model: chat.model, mode: chat.mode, resumeId: chat.sessionId, allowedTools, images }, onEvent, ac.signal);
+    await api.chatStream({ cwd: chat.cwd, message: msg, model: chat.model, mode: chat.mode, effort: chat.effort, resumeId: chat.sessionId, allowedTools, images, engine }, onEvent, ac.signal);
   } catch (e) {
     // A queue must not keep firing into a turn that failed or one you just
     // interrupted — the rest of it stays put, visible, for you to decide on.

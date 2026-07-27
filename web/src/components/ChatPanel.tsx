@@ -11,11 +11,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { ViewHeader } from "./workspace/ViewHeader.tsx";
 import { motion, AnimatePresence } from "motion/react";
-import type { GitRepoRef, SessionRollup } from "../../../shared/types.ts";
+import { CHAT_EFFORTS } from "../../../shared/types.ts";
+import type { GitRepoRef, SessionRollup, ChatEffort } from "../../../shared/types.ts";
 import { api } from "../lib/api.ts";
 import { Markdown } from "../lib/markdown.tsx";
 import { ToolRow } from "./ToolRow.tsx";
+import { ToolFeed } from "./ToolFeed.tsx";
+import { useDialogs } from "./ConfirmDialog.tsx";
 import { buildRows } from "../lib/toolTree.ts";
+import { chatToMarkdown } from "../lib/chatTranscript.ts";
+import { tidyPaneScreen } from "../lib/paneScreen.ts";
+import { quickSkills, pinnedSkills, togglePinnedSkill } from "../lib/quickSkills.ts";
 import { fmtTime } from "../lib/format.ts";
 import { Select } from "./Select.tsx";
 import { SCROLLBAR_CSS, CODE_FONT_STYLE } from "./ChangesModal.tsx";
@@ -26,9 +32,11 @@ import { worktreeTag, sessionWorktree, sessionCwd } from "../lib/worktree.ts";
 import { useStuckBottom } from "../lib/useStuckBottom.ts";
 import {
   listChats, getChat, newChat, closeChat, update, send, stop, enqueue, unqueue, subscribe, chatResuming,
-  DEFAULT_MODEL, DEFAULT_MODE, addAttachments, dropAttachment, renameChat, clearAttention, type Chat,
-  restoredActiveId, setActiveChatId,
+  engineFor,
+  DEFAULT_MODEL, DEFAULT_MODE, addAttachments, answerPane, dropAttachment, renameChat, clearAttention, type Chat,
+  restoredActiveId, setActiveChatId, chatFocusRequest,
 } from "../lib/chatStore.ts";
+import { peekChatIntent, subscribeChatIntent, takeChatIntent } from "../lib/chatIntent.ts";
 import { useSidebarWidth } from "../lib/sidebarWidth.ts";
 import { SidebarGrip } from "./SidebarGrip.tsx";
 
@@ -79,17 +87,18 @@ const selStyle = { background: "color-mix(in srgb, var(--bg3) 50%, transparent)"
  * nothing to say. Collapsed by default and deliberately quiet — this is the
  * working-out, not the answer, and it is usually several times longer.
  *
- * Auto-opens only while it's the only thing happening: watching it stream is the
- * difference between "thinking" and "frozen". It folds itself the moment real
- * output starts.
+ * Closed until asked, streaming or not. It used to open itself while it was the
+ * only thing happening, on the grounds that watching it stream is the difference
+ * between "thinking" and "frozen" — but that put the working-out on screen by
+ * default, which is exactly what nobody asked to read. Liveness is the tool
+ * feed's running call and the composer's caret; this stays folded.
  */
 function Thinking({ text, streaming }: { text: string; streaming: boolean }) {
-  const [openedByHand, setOpenedByHand] = useState<boolean | null>(null);
-  const open = openedByHand ?? streaming;
+  const [open, setOpen] = useState(false);
   const lines = text.trim().split("\n");
   return (
     <div className="mb-1.5 rounded-md overflow-hidden" style={{ background: "color-mix(in srgb, var(--bg3) 30%, transparent)", border: "1px solid color-mix(in srgb, var(--border) 22%, transparent)" }}>
-      <button onClick={() => setOpenedByHand(!open)}
+      <button onClick={() => setOpen(!open)} aria-expanded={open}
         className="w-full flex items-center gap-1.5 px-2 py-1 text-left hover:opacity-80">
         <span className="text-[8px] t-dim2 transition-transform" style={{ transform: open ? "none" : "rotate(-90deg)" }}>▼</span>
         <span className="text-[9px] uppercase tracking-wider" style={{ color: "var(--text3)" }}>thinking</span>
@@ -246,6 +255,150 @@ function ChatRow({ chat, active, onPick, onClose }: { chat: Chat; active: boolea
         aria-label={`Close chat: ${chat.title}`}
       >✕</button>
     </div>
+  );
+}
+
+/** The reply is coming but has not started.
+ *
+ *  Announced once to assistive tech, because the visual signal here is motion
+ *  and motion alone — there is no text to read until the answer begins. */
+function TypingDots() {
+  return (
+    <span className="inline-flex items-center gap-[3.5px] align-middle py-1" role="status" aria-label="Waiting for a reply">
+      {[0, 1, 2].map((i) => (
+        <span key={i} className="agx-typing-dot rounded-full" style={{ width: 5, height: 5, background: "var(--text3)" }} />
+      ))}
+    </span>
+  );
+}
+
+/** An interactive prompt waiting in a chat's tmux pane, and the keys to answer it.
+ *
+ *  The pane is the only thing that can render a `/model` picker properly, so
+ *  this shows what it drew and forwards the few keys a picker takes. Each press
+ *  returns the next frame, which is what makes it feel like using the menu
+ *  rather than firing keys into the dark.
+ *
+ *  Escape both cancels the prompt and clears this, because a cancelled picker
+ *  leaves nothing to answer. */
+function PanePrompt({ chat }: { chat: Chat }) {
+  const screen = useMemo(() => tidyPaneScreen(chat.paneNeedsYou?.screen ?? ""), [chat.paneNeedsYou?.screen]);
+  const press = (k: string) => void answerPane(chat.id, k);
+  // Small, quiet, and second to the real keys. These exist so the keys are
+  // discoverable and for anyone who reaches for the mouse — not as the way in.
+  const Key = ({ label, k }: { label: string; k: string }) => (
+    <button onClick={() => press(k)} title={`Send ${k} to the pane`}
+      className="text-[10px] leading-none px-1.5 py-1 rounded"
+      style={{ color: "var(--text3)", border: "1px solid color-mix(in srgb, var(--border) 40%, transparent)" }}>{label}</button>
+  );
+  return (
+    <div className="mb-2 rounded-lg overflow-hidden"
+      style={{ border: "1px solid color-mix(in srgb, var(--warning) 45%, transparent)" }}>
+      <div className="px-2.5 py-1.5 flex items-center gap-2 text-[11px]"
+        style={{ background: "color-mix(in srgb, var(--warning) 14%, transparent)", color: "var(--text)" }}>
+        <span>Waiting on you</span>
+        {/* The keys the prompt itself names, shown as keys. */}
+        <span className="flex items-center gap-1 ml-auto">
+          <Key label="←" k="Left" /><Key label="→" k="Right" />
+          <Key label="↑" k="Up" /><Key label="↓" k="Down" />
+          <Key label="Enter" k="Enter" /><Key label="Esc" k="Escape" />
+        </span>
+      </div>
+      <pre className="agx-scroll px-2.5 py-2 overflow-x-auto whitespace-pre text-[11px] leading-[1.5] m-0"
+        style={{ ...CODE_FONT_STYLE, background: "color-mix(in srgb, var(--bg3) 45%, transparent)", color: "var(--text2)", maxHeight: 260 }}>{screen}</pre>
+      <div className="px-2.5 py-1 text-[9.5px] t-dim2 flex items-center gap-1.5"
+        style={{ borderTop: "1px solid color-mix(in srgb, var(--border) 30%, transparent)" }}>
+        <span>Your arrow keys work here.</span>
+        {chat.attachCommand && (
+          <button onClick={() => navigator.clipboard?.writeText(chat.attachCommand!)}
+            className="ml-auto hover:opacity-70" title={chat.attachCommand}
+            style={{ color: "var(--text3)" }}>Copy the tmux command</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** How hard the model is asked to think, as a dial you can read at a glance.
+ *
+ *  Bars rather than a dropdown because the values are ordered — the useful
+ *  question is "more or less than now", and a list of six words makes you read
+ *  all six to answer it. Filled bars carry the level; the label names it, since
+ *  bars alone cannot tell `xhigh` from `max`.
+ *
+ *  "Default" is a real seventh state and deliberately first: it means the CLI's
+ *  own configured effort is left alone, which is what someone who set it in
+ *  their settings.json wants. Anything else passes `--effort`. */
+function EffortDial({ chat }: { chat: Chat }) {
+  const [open, setOpen] = useState(false);
+  const at = chat.effort ? CHAT_EFFORTS.indexOf(chat.effort) : -1;
+  const label = chat.effort ?? "default";
+  const pick = (v: ChatEffort | undefined) => {
+    update(chat.id, (c) => { c.effort = v; });
+    setOpen(false);
+  };
+  return (
+    <span className="relative shrink-0">
+      <button onClick={() => setOpen((v) => !v)} aria-expanded={open} aria-haspopup="listbox"
+        title={"How hard the model thinks, sent as --effort.\n\nDefault leaves the CLI's own setting alone.\nChanging this restarts the chat's session, keeping the conversation."}
+        className="flex items-center gap-1.5 text-[10px] px-2 py-1 rounded-md"
+        style={{ color: "var(--text3)", border: "1px solid color-mix(in srgb, var(--border) 45%, transparent)" }}>
+        <span className="flex items-end gap-[2px]" aria-hidden>
+          {CHAT_EFFORTS.map((_, i) => (
+            <span key={i} style={{
+              width: 3, height: 4 + i * 2, borderRadius: 1,
+              background: i <= at ? "var(--primary-hover)" : "color-mix(in srgb, var(--border) 70%, transparent)",
+            }} />
+          ))}
+        </span>
+        <span>{label}</span>
+      </button>
+      {open && (
+        <div role="listbox" className="absolute z-20 mt-1 right-0 rounded-lg py-1 min-w-[150px]"
+          style={{ background: "var(--bg2)", border: "1px solid color-mix(in srgb, var(--border) 60%, transparent)", boxShadow: "0 8px 24px rgba(0,0,0,.35)" }}>
+          <button onClick={() => pick(undefined)} role="option" aria-selected={!chat.effort}
+            className="w-full text-left px-2.5 py-1 text-[11px] hover:bg-white/5"
+            style={{ color: !chat.effort ? "var(--text)" : "var(--text3)" }}>Default</button>
+          {CHAT_EFFORTS.map((v) => (
+            <button key={v} onClick={() => pick(v)} role="option" aria-selected={chat.effort === v}
+              className="w-full text-left px-2.5 py-1 text-[11px] hover:bg-white/5"
+              style={{ color: chat.effort === v ? "var(--text)" : "var(--text3)" }}>{v}</button>
+          ))}
+        </div>
+      )}
+    </span>
+  );
+}
+
+/** A header button that copies something and says it did.
+ *
+ *  The confirmation is the whole point: a copy that succeeds looks exactly like
+ *  a copy that silently failed, and both look like a button that does nothing.
+ *  The label reverts on its own so the header does not stay changed. */
+function CopyButton({ label, title, text, disabled }: { label: string; title: string; text: () => string; disabled?: boolean }) {
+  const [done, setDone] = useState(false);
+  useEffect(() => {
+    if (!done) return;
+    const t = setTimeout(() => setDone(false), 1600);
+    return () => clearTimeout(t);
+  }, [done]);
+  return (
+    <button
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(text());
+          setDone(true);
+        } catch {
+          // Clipboard access can be refused (an insecure origin, a denied
+          // permission). Saying nothing would read as the copy having worked.
+          setDone(false);
+        }
+      }}
+      disabled={disabled}
+      title={title}
+      className="text-[10px] px-2 py-1 rounded-md shrink-0 disabled:opacity-40"
+      style={{ color: done ? "var(--ok, var(--text2))" : "var(--text3)", border: "1px solid color-mix(in srgb, var(--border) 35%, transparent)" }}
+    >{done ? "Copied" : label}</button>
   );
 }
 
@@ -438,6 +591,8 @@ export function ChatView({ active: visible, focusId, onClose = () => {} }: { act
   const [activeId, setActiveId] = useState(restoredActiveId);
   const [repos, setRepos] = useState<GitRepoRef[]>([]);
   const [enabled, setEnabled] = useState(true);
+  // Only used on one path: closing a chat that is still mid-turn.
+  const { ask, dialog } = useDialogs();
   // The server silently downgrades bypassPermissions unless the operator opted
   // in (AGENTGLASS_CHAT_BYPASS=1) — don't offer a mode that wouldn't stick.
   const [bypassAllowed, setBypassAllowed] = useState(false);
@@ -456,11 +611,19 @@ export function ChatView({ active: visible, focusId, onClose = () => {} }: { act
   // --disable-slash-commands is passed, which we never do. What was missing is
   // knowing they exist: you had to remember the exact name with no way to look
   // it up without leaving the chat.
-  const [skills, setSkills] = useState<{ name: string; description: string }[]>([]);
+  // `calls` and `last_used` are kept, not mapped away: the quick strip ranks on
+  // them, and asking the server twice for the same list to get two views of it
+  // would be silly.
+  const [skills, setSkills] = useState<{ name: string; description: string; calls: number; last_used: number | null }[]>([]);
   useEffect(() => {
     if (!open || skills.length) return;
-    api.skills().then((r) => setSkills(r.skills.map((k) => ({ name: k.name, description: k.when_to_use || k.description })))).catch(() => {});
+    api.skills().then((r) => setSkills(r.skills.map((k) => ({
+      name: k.name, description: k.when_to_use || k.description, calls: k.calls, last_used: k.last_used,
+    })))).catch(() => {});
   }, [open, skills.length]);
+  const [pinnedNames, setPinnedNames] = useState<string[]>(() => pinnedSkills());
+  const quick = useMemo(() => quickSkills(skills, pinnedNames), [skills, pinnedNames]);
+  const togglePin = (name: string) => setPinnedNames(togglePinnedSkill(name));
 
   // Looked up in the scoped list, not the store, so a restored tab belonging to
   // another project never renders even for the frame before the effect below
@@ -522,6 +685,14 @@ export function ChatView({ active: visible, focusId, onClose = () => {} }: { act
     // the ones about to appear.
     if (!scopeKnown) return;
     if (!seeded.current && !chats.length && defaultCwd) {
+      // Stand aside for a controller that asked for a new chat: it is about to
+      // add one of its own, and seeding first would leave two empty tabs. Not a
+      // race — this effect is declared above the one that drains, so on the
+      // commit where both gates open it always runs first. A peek rather than a
+      // take because the drain is the one that acts on it, and it cannot see
+      // this tab to skip its own `add()`: `activeIdRef` is assigned during
+      // render and is still empty in the same effect pass.
+      if (peekChatIntent() === "new") return;
       seeded.current = true;
       setActiveId(newChat(defaultCwd).id);
       return;
@@ -537,6 +708,12 @@ export function ChatView({ active: visible, focusId, onClose = () => {} }: { act
   // Opened to continue a specific session (from the fleet view): show that tab
   // rather than whichever was last active, or the request looks ignored.
   useEffect(() => { if (focusId && getChat(focusId)) setActiveId(focusId); }, [focusId]);
+
+  // The same thing asked from inside the workspace, where there is no prop to
+  // pass: the PR panel seeds a chat and asks for it. The request carries a
+  // serial, so asking again for the tab you just wandered off brings it back.
+  const focusReq = useSyncExternalStore(subscribe, chatFocusRequest, chatFocusRequest);
+  useEffect(() => { if (focusReq.id && getChat(focusReq.id)) setActiveId(focusReq.id); }, [focusReq]);
 
   useEffect(() => { if (defaultCwd) { try { localStorage.setItem(CWD_KEY, defaultCwd); } catch { /* ignore */ } } }, [defaultCwd]);
 
@@ -559,7 +736,13 @@ export function ChatView({ active: visible, focusId, onClose = () => {} }: { act
   const { scrollRef, contentRef, pinned, toBottom, onScroll } =
     useStuckBottom(open ? active?.id ?? "" : null);
 
-  const add = useCallback(() => {
+  /** Open a chat.
+   *
+   *  `seed` is the first thing typed when there was no chat to type into — the
+   *  composer opens one rather than sending the keystroke nowhere. It also
+   *  suppresses the refocus below: the box is already focused, and calling
+   *  focus() again would move the caret off the character just typed. */
+  const add = useCallback((seed?: string) => {
     // `workspace` last: a scoped instance always has one, so the only way to
     // reach "" now is a machine with no repo at all.
     const cwd = active?.cwd || defaultCwd || repos[0]?.root || workspace || "";
@@ -571,8 +754,10 @@ export function ChatView({ active: visible, focusId, onClose = () => {} }: { act
     if (!cwd) { setNoRepo(true); return; }
     setNoRepo(false);
     const c = newChat(cwd, active?.model ?? DEFAULT_MODEL, active?.mode ?? DEFAULT_MODE);
+    if (seed) update(c.id, (x) => { x.draft = seed; });
     setActiveId(c.id);
-    requestAnimationFrame(() => inputRef.current?.focus());
+    if (!seed) requestAnimationFrame(() => inputRef.current?.focus());
+    return c;
   }, [active, defaultCwd, repos, workspace]);
 
   // Adopt an existing claude session. Focusing an already-open tab rather than
@@ -593,14 +778,35 @@ export function ChatView({ active: visible, focusId, onClose = () => {} }: { act
     requestAnimationFrame(() => inputRef.current?.focus());
   }, [active]);
 
-  const drop = useCallback((id: string) => {
-    const rest = listChats().filter((c) => c.id !== id);
+  const drop = useCallback(async (id: string) => {
+    // Closing a chat also releases its tmux pane, which costs nothing when the
+    // chat is idle — the transcript survives and Resume relaunches it. Mid-turn
+    // is the one case that throws away real work: the agent may be halfway
+    // through editing files or running a build, and nothing else in the app
+    // would say so. Ask, and only here.
+    const c = getChat(id);
+    if (c?.sending) {
+      const ok = await ask({
+        title: "Close this chat while it is still working?",
+        body: `"${c.title}" has a turn in progress. Closing stops it, and anything it was part-way through is left as it is.\n\nThe conversation itself is kept — you can pick it back up from Resume.`,
+        confirmLabel: "Close and stop",
+        cancelLabel: "Keep it open",
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    const rest = listChats().filter((x) => x.id !== id);
     closeChat(id);
     if (activeIdRef.current === id) setActiveId(rest[rest.length - 1]?.id ?? "");
-  }, []);
+  }, [ask]);
 
   const submit = () => {
     if (!active) return;
+    // Sending ends the browse. Anything stashed has been superseded by the
+    // message going out, and the next Up should start from the newest again —
+    // which is what a shell does too.
+    setRecallAt(-1);
+    stashed.current = "";
     const text = active.draft;
     // Mid-turn, Enter queues instead of sending. The composer used to go dead
     // for the length of a reply, so a long tool-running turn meant watching it
@@ -609,6 +815,27 @@ export function ChatView({ active: visible, focusId, onClose = () => {} }: { act
     send(active.id, text, () => openRef.current && activeIdRef.current === active.id, allowed.split(/\s+/).filter(Boolean));
   };
   const [hint, setHint] = useState("");
+
+  // An external controller (a Stream Deck) asked for a new chat. Drained from
+  // the mailbox rather than subscribed to, because the command that opens this
+  // panel arrives before it is mounted — see lib/chatIntent.ts.
+  useEffect(() => {
+    // Not until the panel knows where a chat could run. `add()` resolves a cwd
+    // from the repo list and the workspace scope, and both of those arrive
+    // asynchronously after the panel opens — while the command that *opened*
+    // it landed before either. Draining at mount would therefore spend the
+    // intent on an `add()` with nothing to point at, refuse with "no repo",
+    // and — the mailbox holding one slot and no history — leave nothing to
+    // retry once the repos did arrive. On a browser that has chatted before
+    // the remembered cwd covers for this; on a fresh profile it is the whole
+    // first press. Waiting costs one render and removes the case entirely.
+    if (!reposKnown || !scopeKnown) return;
+    const run = () => {
+      if (takeChatIntent() === "new") add();
+    };
+    run();
+    return subscribeChatIntent(run);
+  }, [add, reposKnown, scopeKnown]);
   // A turn is sendable when there is text or at least one attachment.
   const hasTurn = !!(active?.draft.trim() || active?.attachments.length);
 
@@ -636,8 +863,13 @@ export function ChatView({ active: visible, focusId, onClose = () => {} }: { act
   };
 
   const onPaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    if (!active) return;
     const files = imagesFrom(e.clipboardData);
+    // Pasting a screenshot into an empty panel is a complete thought too, and
+    // the same reason typing opens a chat applies here: the alternative is a
+    // paste that appears to work and goes nowhere. Pasted text needs no help —
+    // it lands as a change event and opens a chat through onChange.
+    const chat = active ?? (files.length ? add() ?? null : null);
+    if (!chat) return;
     if (!files.length) {
       // A paste that carried a file which wasn't an image would otherwise look
       // identical to the feature being broken.
@@ -648,7 +880,7 @@ export function ChatView({ active: visible, focusId, onClose = () => {} }: { act
       return;
     }
     e.preventDefault();
-    setHint(await addAttachments(active.id, files));
+    setHint(await addAttachments(chat.id, files));
   };
 
   // A drag crossing a child element fires `dragleave` on the parent, so the
@@ -689,7 +921,69 @@ export function ChatView({ active: visible, focusId, onClose = () => {} }: { act
     setHint(await addAttachments(active.id, files));
   };
 
+  /*
+   * Where recall currently sits, and what it interrupted.
+   *
+   * `-1` means not browsing. The stash is what was in the box when browsing
+   * started, so coming all the way forward returns it rather than leaving you
+   * staring at an empty composer wondering where your half-written message
+   * went. Both reset when the chat changes: history is per conversation, and
+   * an index into someone else's messages is meaningless.
+   */
+  const [recallAt, setRecallAt] = useState(-1);
+  const stashed = useRef("");
+  useEffect(() => { setRecallAt(-1); stashed.current = ""; }, [active?.id]);
+
+  /** This chat's own sent messages, newest first. Queued turns are deliberately
+   *  absent: they have not been said yet, and recalling one would put the same
+   *  text in the box twice over. */
+  const history = useMemo(
+    () => (active?.messages ?? []).filter((m) => m.role === "user" && m.text.trim()).map((m) => m.text).reverse(),
+    [active?.messages]
+  );
+
+  /** Step back one. Returns null when there is nothing older, so the caller can
+   *  let the keystroke through and the caret moves as it normally would. */
+  const recallOlder = (chat: Chat): string | null => {
+    const next = recallAt + 1;
+    if (next >= history.length) return null;
+    if (recallAt === -1) stashed.current = chat.draft;
+    setRecallAt(next);
+    update(chat.id, (c) => { c.draft = history[next]; });
+    return history[next];
+  };
+
+  /** Step forward one, landing back on the stashed draft past the newest. */
+  const recallNewer = (chat: Chat): string | null => {
+    if (recallAt < 0) return null;
+    const next = recallAt - 1;
+    setRecallAt(next);
+    const text = next < 0 ? stashed.current : history[next];
+    update(chat.id, (c) => { c.draft = text; });
+    return text;
+  };
+
+  const PANE_KEYS: Record<string, string> = {
+    ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right",
+    Enter: "Enter", Escape: "Escape", Tab: "Tab",
+  };
+
   const onKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    /*
+     * A prompt waiting in the pane owns the keyboard, and this has to be the
+     * first thing checked.
+     *
+     * The picker itself says "←/→ to adjust · Enter to confirm". Shipping that
+     * instruction next to buttons you had to click instead was the wrong way
+     * round — the keys it names are the ones that should work. The buttons stay
+     * as the discoverable version, and for anyone who reaches for the mouse.
+     */
+    if (active?.paneNeedsYou) {
+      const k = PANE_KEYS[e.key];
+      if (k) { e.preventDefault(); void answerPane(active.id, k); return; }
+      // Anything else is someone typing a message instead of answering. Let it
+      // through rather than swallowing it — the prompt is not a modal.
+    }
     // The skill menu owns the arrows, Tab and Enter while it is showing, or
     // Enter would send `/rev` as a message instead of completing it.
     if (slashMatches.length) {
@@ -702,6 +996,34 @@ export function ChatView({ active: visible, focusId, onClose = () => {} }: { act
     // A focused textarea can swallow Escape before it reaches the global
     // handler, stranding the panel open. Close it here instead.
     if (e.key === "Escape") { e.preventDefault(); onClose(); return; }
+    /*
+     * Shell-style recall: Up walks back through what you have sent in this
+     * chat, Down comes forward again and lands back on whatever you were part
+     * way through typing.
+     *
+     * Gated on the caret being on the first or last line, because a composer
+     * that ate the arrow keys would make a multi-line message impossible to
+     * edit. On the first line there is nothing above to move to, so Up is free
+     * to mean something else — which is the same rule a shell uses.
+     */
+    if ((e.key === "ArrowUp" || e.key === "ArrowDown") && !e.shiftKey && !e.altKey && active) {
+      const el = e.currentTarget;
+      const before = el.value.slice(0, el.selectionStart ?? 0);
+      const after = el.value.slice(el.selectionEnd ?? 0);
+      const atFirstLine = !before.includes("\n");
+      const atLastLine = !after.includes("\n");
+      const moved = e.key === "ArrowUp"
+        ? (atFirstLine ? recallOlder(active) : null)
+        : (atLastLine ? recallNewer(active) : null);
+      if (moved !== null) {
+        e.preventDefault();
+        // Caret to the end, so the recalled text is ready to be added to
+        // rather than typed over from wherever the cursor happened to sit.
+        requestAnimationFrame(() => { const n = el.value.length; el.setSelectionRange(n, n); });
+        return;
+      }
+      return;
+    }
     if (e.key !== "Enter" || e.shiftKey) return;
     e.preventDefault();
     // send() returns early in both these cases; without saying so, Enter just
@@ -747,7 +1069,7 @@ export function ChatView({ active: visible, focusId, onClose = () => {} }: { act
                   <button onClick={() => setResumeOpen((v) => !v)} aria-expanded={resumeOpen} aria-haspopup="listbox"
                     className="text-[11px] px-2.5 py-1 rounded-lg shrink-0" style={{ color: "var(--text2)", border: "1px solid color-mix(in srgb, var(--border) 35%, transparent)" }}
                     title="Continue a session that already exists — e.g. one you started in a terminal">↩ Resume</button>
-                  <button onClick={add} className="text-[11px] px-2.5 py-1 rounded-lg shrink-0" style={{ color: "var(--text2)", border: "1px solid color-mix(in srgb, var(--border) 35%, transparent)" }} title="New chat">+ New</button>
+                  <button onClick={() => add()} className="text-[11px] px-2.5 py-1 rounded-lg shrink-0" style={{ color: "var(--text2)", border: "1px solid color-mix(in srgb, var(--border) 35%, transparent)" }} title="New chat">+ New</button>
                 </>} />
 
                 <div className="flex-1 min-h-0 flex overflow-hidden">
@@ -771,7 +1093,7 @@ export function ChatView({ active: visible, focusId, onClose = () => {} }: { act
                         {query.trim() ? "No chats match"
                           : !reposKnown || !scopeKnown ? "Finding your projects…"
                           : !repos.length ? "No git repository found to run a chat in"
-                          : "No chats yet — press + new"}
+                          : "No chats yet — start typing below, or press + new"}
                       </div>
                     )}
                     {noRepo && (
@@ -808,7 +1130,55 @@ export function ChatView({ active: visible, focusId, onClose = () => {} }: { act
                             style={{ background: "color-mix(in srgb, var(--bg3) 50%, transparent)", border: "1px solid color-mix(in srgb, var(--border) 40%, transparent)", color: "var(--text2)" }}
                           />
                         )}
+                        <EffortDial chat={active} />
+                        {/* Claude Code's own settings, which are global rather
+                            than per chat — so a button rather than something
+                            you have to remember is a slash command. Only in
+                            pane mode: `claude -p` has no interactive config to
+                            open, and offering a button that cannot work is
+                            worse than not offering one. */}
+                        {engineFor(active) === "tmux" && active.sessionId && (
+                          <button
+                            onClick={() => send(active.id, "/config", () => openRef.current && activeIdRef.current === active.id, [])}
+                            disabled={active.sending}
+                            title="Open Claude Code's own settings in this chat's pane. They apply to every chat, not just this one."
+                            className="text-[10px] px-2 py-1 rounded-md shrink-0 disabled:opacity-40"
+                            style={{ color: "var(--text3)", border: "1px solid color-mix(in srgb, var(--border) 45%, transparent)" }}
+                          >⚙ Config</button>
+                        )}
                         {active.sessionId && <span className="text-[9.5px] t-dim2 tabular-nums" title="Resuming this session">↻ {active.sessionId.slice(0, 8)}</span>}
+                        {/* Pushed right so the two copy actions sit together at
+                            the end of the header rather than between pickers. */}
+                        <span className="ml-auto flex items-center gap-1.5">
+                          {/* Where this chat runs, stated before its first turn
+                              rather than after. Shown only for the pane engine:
+                              `claude -p` is the long-standing behaviour and a
+                              badge on every chat saying "normal" is noise. The
+                              chip is the only way to tell the two apart from the
+                              outside, and without it a preference that had not
+                              taken effect looked exactly like one that had. */}
+                          {engineFor(active) === "tmux" && (
+                            active.attachCommand ? (
+                              <CopyButton
+                                label="⧉ tmux"
+                                title={`This chat runs in a tmux pane. Copy the command that opens it in your own terminal, where you can keep typing:\n\n${active.attachCommand}`}
+                                text={() => active.attachCommand!}
+                              />
+                            ) : (
+                              <span
+                                className="text-[10px] px-2 py-1 rounded-md shrink-0"
+                                style={{ color: "var(--text3)", border: "1px dashed color-mix(in srgb, var(--border) 35%, transparent)" }}
+                                title="This chat will run in a tmux pane. The pane starts with the first message, and this turns into a button that copies the command to open it in your terminal."
+                              >⧉ tmux on send</span>
+                            )
+                          )}
+                          <CopyButton
+                            label="Copy chat"
+                            title="Copy the whole conversation as markdown — messages, reasoning and tool calls"
+                            text={() => chatToMarkdown(active)}
+                            disabled={!active.messages.length}
+                          />
+                        </span>
                       </>
                     ) : <span className="text-[12px] t-dim2">No chat selected</span>}
                   </div>
@@ -873,21 +1243,22 @@ export function ChatView({ active: visible, focusId, onClose = () => {} }: { act
                               <span className="t-dim2 normal-case tracking-normal">{fmtTime(m.ts)}</span>
                             </div>
                             {m.thinking && <Thinking text={m.thinking} streaming={!!m.streaming && !m.text} />}
-                            {m.tools.length > 0 && (
-                              <div className="flex flex-col gap-0.5 mb-1.5 pb-1.5" style={{ borderBottom: "1px solid color-mix(in srgb, var(--border) 30%, transparent)" }}>
-                                {/* Folded the same way the session timeline
-                                    folds it: a subagent's work nests under the
-                                    call that spawned it rather than being
-                                    interleaved with the main thread's. */}
-                                {buildRows(m.tools.map((t) => ({
-                                  kind: "tool" as const, ts: t.ts, tool: t.name, target: t.target,
-                                  is_error: t.error, output: t.output, note: t.note,
-                                  agent_id: t.agentId, agent_type: t.agentType, tool_use_id: t.id,
-                                }))).map((r) => r.kind === "tool" && (
-                                  <ToolRow key={r.key} e={r.e} sub={r.children} />
-                                ))}
-                              </div>
-                            )}
+                            {/* Behind a fold, not in front of the answer. The
+                                summary line carries the running call and any
+                                failure; the feed itself is one click away. */}
+                            <ToolFeed tools={m.tools} streaming={!!m.streaming}>
+                              {/* Folded the same way the session timeline
+                                  folds it: a subagent's work nests under the
+                                  call that spawned it rather than being
+                                  interleaved with the main thread's. */}
+                              {buildRows(m.tools.map((t) => ({
+                                kind: "tool" as const, ts: t.ts, tool: t.name, target: t.target,
+                                is_error: t.error, output: t.output, note: t.note,
+                                agent_id: t.agentId, agent_type: t.agentType, tool_use_id: t.id,
+                              }))).map((r) => r.kind === "tool" && (
+                                <ToolRow key={r.key} e={r.e} sub={r.children} />
+                              ))}
+                            </ToolFeed>
                             {!!m.images?.length && (
                               <div className="flex flex-wrap gap-1.5 mb-1.5">
                                 {m.images.map((img, j) => (
@@ -902,8 +1273,8 @@ export function ChatView({ active: visible, focusId, onClose = () => {} }: { act
                                 {m.imagesDropped} image{m.imagesDropped > 1 ? "s" : ""} sent with this turn, not kept when the chat was restored
                               </div>
                             )}
-                            {m.text ? <Markdown text={m.text} /> : (m.streaming ? <span className="t-dim2">▍</span> : "")}
-                            {m.streaming && m.text && <span className="t-dim2">▍</span>}
+                            {m.text ? <Markdown text={m.text} /> : (m.streaming ? <TypingDots /> : "")}
+                            {m.streaming && m.text && <span className="t-dim2 agx-caret">▍</span>}
                           </div>
                           </div>
                         </div>
@@ -951,6 +1322,31 @@ export function ChatView({ active: visible, focusId, onClose = () => {} }: { act
                           </div>
                         ))}
                       </div>
+                    )}
+                    {quick.length > 0 && active && !active.sending && (
+                      // What you pinned, then what you actually run. The `/`
+                      // menu already lists everything, but fifty entries behind
+                      // a keystroke you have to remember is a reference, not a
+                      // shortcut. Hidden mid-turn: the composer is for queueing
+                      // then, and a row of one-click starters invites the wrong
+                      // thing.
+                      <div className="mb-2 flex items-center gap-1.5 flex-wrap">
+                        {quick.map((k) => (
+                          <button key={k.name} onClick={() => pickSkill(k.name)}
+                            title={`${k.description}${k.calls ? `\n\nRun ${k.calls} time${k.calls === 1 ? "" : "s"}` : ""}`}
+                            className="text-[10.5px] px-2 py-1 rounded-md shrink-0 flex items-center gap-1"
+                            style={{ color: "var(--text2)", border: "1px solid color-mix(in srgb, var(--border) 40%, transparent)" }}>
+                            {pinnedNames.includes(k.name) && <span style={{ color: "var(--primary-hover)" }}>★</span>}
+                            /{k.name}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {active?.paneNeedsYou && (
+                      // Answerable from here. The alternative shipped first and
+                      // was telling someone to open a terminal to move a cursor
+                      // one step, which is a dead end wearing instructions.
+                      <PanePrompt chat={active} />
                     )}
                     {active?.setupNeeded && (
                       // The CLI never started. Retrying is pointless until the
@@ -1006,6 +1402,16 @@ export function ChatView({ active: visible, focusId, onClose = () => {} }: { act
                             style={{ background: i === slashIdx ? "color-mix(in srgb, var(--primary) 16%, transparent)" : "transparent" }}>
                             <span className="text-[11.5px] shrink-0" style={{ color: "var(--primary-hover)" }}>/{k.name}</span>
                             <span className="text-[10px] t-dim2 truncate">{k.description}</span>
+                            {/* Pinning lives here because this is the one place
+                                every skill is listed. onMouseDown, and stopped,
+                                so pinning does not also insert the command. */}
+                            <button
+                              onMouseDown={(ev) => { ev.preventDefault(); ev.stopPropagation(); togglePin(k.name); }}
+                              title={pinnedNames.includes(k.name) ? `Unpin /${k.name}` : `Pin /${k.name} to the quick strip`}
+                              aria-label={pinnedNames.includes(k.name) ? `Unpin ${k.name}` : `Pin ${k.name}`}
+                              className="ml-auto shrink-0 text-[10px] px-1 leading-none hover:opacity-100"
+                              style={{ color: pinnedNames.includes(k.name) ? "var(--primary-hover)" : "var(--text3)", opacity: pinnedNames.includes(k.name) ? 1 : 0.55 }}
+                            >★</button>
                           </div>
                         ))}
                         <div className="px-2.5 py-1 text-[9.5px] t-dim2" style={{ borderTop: "1px solid color-mix(in srgb, var(--border) 30%, transparent)" }}>
@@ -1057,8 +1463,22 @@ export function ChatView({ active: visible, focusId, onClose = () => {} }: { act
                         style={{ background: "color-mix(in srgb, var(--bg3) 40%, transparent)", border: "1px solid color-mix(in srgb, var(--border) 45%, transparent)", color: "var(--text3)" }}>
                         <ClipIcon />
                       </button>
-                      <textarea ref={inputRef} aria-label="Chat composer" value={active?.draft ?? ""} disabled={!enabled || !active} rows={2}
-                        onChange={(e) => active && update(active.id, (c) => { c.draft = e.target.value; })}
+                      {/* Enabled with no chat open, because typing is how you
+                          open one. The composer was disabled until you had
+                          pressed + New, which put a working-looking input in
+                          front of you that silently swallowed everything —
+                          the empty state said "press + new" and the box said
+                          "Message a new session…", and only one of them was
+                          telling the truth. */}
+                      <textarea ref={inputRef} aria-label="Chat composer" value={active?.draft ?? ""} disabled={!enabled} rows={2}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          if (active) { update(active.id, (c) => { c.draft = v; }); return; }
+                          // Only real text opens a chat. Otherwise clearing the
+                          // box, or a stray empty change event, would leave a
+                          // trail of blank tabs behind.
+                          if (v) add(v);
+                        }}
                         onKeyDown={onKey}
                         onPaste={onPaste}
                         placeholder={!enabled ? "Chat unavailable" : active?.sending ? "Still replying — type anyway, Enter queues it for the next turn" : active?.sessionId ? "Reply… (Enter to send, Shift+Enter newline)" : "Message a new session… (Enter to send)"}
@@ -1079,12 +1499,15 @@ export function ChatView({ active: visible, focusId, onClose = () => {} }: { act
                     <div className="mt-1.5 text-[9.5px] t-dim2">
                       {hint
                         ? <span style={{ color: "var(--warning)" }}>{hint}</span>
-                        : <>Runs claude in {active ? repoName(active.cwd) || "the repo" : "the repo"} · {MODES.find((x) => x.id === active?.mode)?.label} · tools appear as ⚙ chips</>}
+                        : <>Runs claude in {active ? repoName(active.cwd) || "the repo" : "the repo"} · {MODES.find((x) => x.id === active?.mode)?.label} · tool calls fold away, click to open</>}
                       {active?.mode === "bypassPermissions" && <span style={{ color: "var(--warning)" }}> · ⚡ runs tools unattended</span>}
                     </div>
                   </div>
                 </div>
                 </div>
+      {/* The mid-turn close confirmation. Mounted here so it renders whether or
+          not the panel is the active view. */}
+      {dialog}
     </div>
   );
 }

@@ -4,10 +4,12 @@ import { useLive } from "./lib/useLive.ts";
 import { useStats } from "./lib/useStats.ts";
 import { useImpact } from "./lib/useImpact.ts";
 import { deriveAgents, deriveAlerts, buildTitles } from "./lib/derive.ts";
+import { publishFleet } from "./lib/demoBridge.ts";
 import { providerOf } from "./lib/format.ts";
 import { api, IS_DEMO } from "./lib/api.ts";
 import { initialTheme, applyTheme, THEMES } from "./lib/themes.ts";
 import { subscribeControl } from "./lib/controlBus.ts";
+import { latchChatIntent } from "./lib/chatIntent.ts";
 import type { ControlCmd } from "../../shared/types.ts";
 import { actionFor } from "./lib/keybindings.ts";
 import { currentScale, nudgeScale, resetScale } from "./lib/uiScale.ts";
@@ -65,32 +67,6 @@ const keepIfSame = <T,>(set: (v: T) => void) => {
 };
 
 export default function App() {
-  const { events, conn, lastEvent, openTools } = useLive();
-  // The live socket is the app's only real-time source, and until now the chat
-  // panel was the one view that never saw it — a resumed session sat frozen on
-  // whatever had been true when you opened it while the agent kept working.
-  // This is the whole subscription: the store decides which chat, if any, each
-  // event belongs to, and ignores everything else.
-  //
-  // Only the events past the high-water mark. `events` is a rolling buffer of
-  // two thousand and every socket flush replaces the array, so handing the
-  // whole thing to the store each time meant re-walking all of it — and the
-  // store's own "seen" guard doesn't help, because it only records events that
-  // matched an open chat. With no chat open, which is most of the time, nothing
-  // was ever marked and every flush paid for all two thousand. That work lands
-  // on the same thread that draws the terminal, which is where it showed up:
-  // sluggish output and dropped keystrokes.
-  const appliedThrough = useRef(0);
-  useEffect(() => {
-    let high = appliedThrough.current;
-    for (const e of events) {
-      if (e.id <= appliedThrough.current) continue;
-      applyLiveEvent(e);
-      if (e.id > high) high = e.id;
-    }
-    appliedThrough.current = high;
-  }, [events]);
-
   const [windowMs, setWindowMs] = useState(3_600_000);
   const [filter, setFilter] = useState({ app: "", type: "", provider: "" });
   const [theme, setTheme] = useState(initialTheme());
@@ -154,9 +130,52 @@ export default function App() {
   // it already does for a backgrounded tab. It is a play-state flip rather than
   // an unmount, so closing the workspace resumes them instantly and switching
   // between the two stays immediate.
+  //
+  // A full-screen modal covers it just as completely, and that case was missed:
+  // reading a session meant scrolling a few hundred rows on the same CPU that
+  // was still sweeping a radar and pulsing a ring per live agent behind the
+  // dim. Same treatment, same attribute.
+  const covered = wsOpen || anyPanelOpen;
   useEffect(() => {
-    document.documentElement.dataset.ws = wsOpen ? "1" : "0";
-  }, [wsOpen]);
+    document.documentElement.dataset.ws = covered ? "1" : "0";
+  }, [covered]);
+
+  // Same argument, one level deeper: freezing the animations still left the
+  // dashboard re-rendering five times a second — a two-thousand-event feed, two
+  // charts and a fleet grid — behind whatever is on top of it. Holding the
+  // socket's buffer instead gives the panel you are actually reading the main
+  // thread to itself, and uncovering flushes it in one go.
+  //
+  // NOT while the workspace is open, even though it covers the dashboard just
+  // as thoroughly: the chat panel inside it is a live view fed by these very
+  // events, and holding them would freeze a streaming answer mid-word. A modal
+  // over the workspace (the skills catalog opens there) is left alone for the
+  // same reason.
+  const { events, conn, lastEvent, openTools } = useLive(anyPanelOpen && !wsOpen);
+  // The live socket is the app's only real-time source, and until now the chat
+  // panel was the one view that never saw it — a resumed session sat frozen on
+  // whatever had been true when you opened it while the agent kept working.
+  // This is the whole subscription: the store decides which chat, if any, each
+  // event belongs to, and ignores everything else.
+  //
+  // Only the events past the high-water mark. `events` is a rolling buffer of
+  // two thousand and every socket flush replaces the array, so handing the
+  // whole thing to the store each time meant re-walking all of it — and the
+  // store's own "seen" guard doesn't help, because it only records events that
+  // matched an open chat. With no chat open, which is most of the time, nothing
+  // was ever marked and every flush paid for all two thousand. That work lands
+  // on the same thread that draws the terminal, which is where it showed up:
+  // sluggish output and dropped keystrokes.
+  const appliedThrough = useRef(0);
+  useEffect(() => {
+    let high = appliedThrough.current;
+    for (const e of events) {
+      if (e.id <= appliedThrough.current) continue;
+      applyLiveEvent(e);
+      if (e.id > high) high = e.id;
+    }
+    appliedThrough.current = high;
+  }, [events]);
 
   // Which folder is this cockpit about? Ask once on first open when nothing is
   // scoped yet — picking a project up front is what gives the terminal, git
@@ -274,6 +293,14 @@ export default function App() {
   );
   const alerts = useMemo(() => deriveAlerts(agents), [agents]);
   useAlertSound(alerts.length, sound);
+
+  // Demo builds only: hand the fleet to whoever is showing this build inside a
+  // frame. Today that is the landing page's head-up display, which draws the
+  // same eight sessions over the top of this dashboard and has to agree with it
+  // to the cent. A no-op in every other build — see lib/demoBridge.ts.
+  useEffect(() => {
+    publishFleet(agentsAll, stats?.totals.cost_usd ?? 0);
+  }, [agentsAll, stats]);
 
   const clearFilters = useCallback(() => setFilter({ app: "", type: "", provider: "" }), []);
 
@@ -470,6 +497,13 @@ export default function App() {
           break;
         case "zoom":
           setScale(cmd.dir === 0 ? resetScale() : nudgeScale(cmd.dir));
+          break;
+        case "chat":
+          // Latch before opening: the panel drains the mailbox on mount, so
+          // this works whether or not the chat view is already up.
+          latchChatIntent(cmd.do);
+          setWsView("chat");
+          setWsOpen(true);
           break;
       }
     });

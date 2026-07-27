@@ -32,6 +32,7 @@ import { parseControlCmd } from "./control.ts";
 import { otlpTracesToEvents, otlpLogsToEvents } from "./otlp.ts";
 import { decodeOtlpTraces, decodeOtlpLogs } from "./otlp_pb.ts";
 import { statusForPaths, commit as gitCommit, COMMIT_ENABLED, gitAsync, gitCapability } from "./git.ts";
+import { dependencyReport } from "./deps.ts";
 import {
   workingTree, discoverRepos, stage, unstage, stageAll, unstageAll, discard,
   commitStaged, push as gitPush, pull as gitPull, fetch as gitFetch,
@@ -56,12 +57,15 @@ import {
 } from "./docker.ts";
 import {
   listPrs, prDetail, prDiff, prAsset, ghCapability, submitReview, addComment, replyToThread,
+  editComment, deleteComment, setFileViewed, setAssignees, setMilestone, viewCounts, jobLog, checkJobs, rerunJobs, addLineComment, mentionables, facetOptions, applySuggestion, fileSlice,
   setThreadResolved, react, editPr, setLabels, setReviewers, setDraft, updateBranch,
-  rerunFailedChecks, mergePr, closePr, prepareLocalReview, discardLocalReview, branchUrl, subscribeCi, commitDiff as prCommitDiff, submitReviewWith,
+  rerunFailedChecks, mergePr, closePr, prepareReviewPrompt, branchUrl, subscribeCi, commitDiff as prCommitDiff, submitReviewWith,
 } from "./prs.ts";
 import { generateWalkthrough, WALKTHROUGH_ENABLED } from "./walkthrough.ts";
-import { ptyOpen, ptyMessage, ptyClose, projectCommands, shutdownTerminals, TERMINAL_ENABLED, type PtyWsData } from "./terminal.ts";
-import { chatStream, CHAT_ENABLED, CHAT_BYPASS_ALLOWED } from "./chat.ts";
+import { ptyOpen, ptyMessage, ptyClose, projectCommands, shutdownTerminals, TERMINAL_ENABLED, PTY_BACKEND, type PtyWsData } from "./terminal.ts";
+import { chatSend, CHAT_ENABLED, CHAT_BYPASS_ALLOWED, CHAT_ENGINE_DEFAULT } from "./chat.ts";
+import { paneEngineCapability, attachCommand, validPaneName } from "./chatpane.ts";
+import { paneAlive, killPane, forgetPane, startPaneSweeper, sendKey, sendableKey, capture as capturePane } from "./tmuxpane.ts";
 // AgentGlass Argus integration — the environment tier. Sees the machine underneath the
 // agents' self-reports: runtimes present but reporting nothing, outbound AI
 // connections, and (opt-in) unclaimed file writes. Its rows live in their own
@@ -79,13 +83,14 @@ import {
   redlineStatus, reloadRedlines, upsertRedline, deleteRedline,
 } from "./argus/redlines.ts";
 import { startScanner, ownsSession, knownProjects, resyncScope, SCAN_ENABLED } from "./transcripts.ts";
-import { workspaceRoot, setWorkspaceRoot, inScope, CONFIG_PATH } from "./config.ts";
+import { workspaceRoot, setWorkspaceRoot, inScope } from "./config.ts";
 import { hookStatus, applyHooks } from "./hooksetup.ts";
 import { privateHost } from "./net.ts";
 import { resolveToken, tokenOk, isIntake, isAuthExempt } from "./auth.ts";
 import { clientIdentity } from "./clientIdentity.ts";
 import { updateStatus, startUpdate, updateLog, releaseNotes } from "./selfupdate.ts";
 import { rateOk } from "./ratelimit.ts";
+import { noteClient, isLoopback, remoteStatus } from "./remote.ts";
 import { parseWindowMs } from "./params.ts";
 import { serveWeb, serveIndex, WEB_UI_ENABLED } from "./webui.ts";
 import { notifyCapability, subscribeNotifications, notifyWatching, openNote } from "./notifications.ts";
@@ -490,6 +495,11 @@ const server = Bun.serve<WsData>({
     // anonymous freeze in a terminal. See loopwatch.ts.
     entered(`${req.method} ${pathname}`);
 
+    // Proof of reachability for the remote-access panel: which off-box devices
+    // have actually arrived. Loopback is ignored — it is every call the app
+    // makes of itself and says nothing about whether a phone can get in.
+    noteClient(srv.requestIP(req)?.address);
+
     // Per-request response helpers: `cors` reflects this caller's Origin, so it
     // has to be built here rather than shared as a module constant.
     const cors = corsFor(req);
@@ -779,6 +789,30 @@ const server = Bun.serve<WsData>({
       broadcast({ type: "control", data: cmd });
       return json({ ok: true });
     }
+    /**
+     * Where this server can be reached from another device, and whether one
+     * ever has been.
+     *
+     * The token is handed out only to a caller on this machine. A page loaded
+     * over the LAN has already proved it holds the token to get this far, so
+     * withholding it is not a secret kept from a legitimate client — it is a
+     * refusal to *re-serve* the credential to whatever else is on the wifi if
+     * the token is ever set aside. The local UI is the only thing that needs it
+     * anyway: it is what draws the QR code.
+     */
+    if (pathname === "/remote/status") {
+      const ip = srv.requestIP(req)?.address ?? null;
+      return json(
+        remoteStatus({
+          bind: BIND,
+          port: srv.port ?? PORT,
+          trustLan: TRUST_LAN,
+          token: AUTH_TOKEN,
+          webUi: WEB_UI_ENABLED,
+          includeToken: !!ip && isLoopback(ip),
+        })
+      );
+    }
     if (pathname === "/search") {
       const q = url.searchParams.get("q") || "";
       const limit = Math.min(200, Number(url.searchParams.get("limit") || 60));
@@ -813,6 +847,12 @@ const server = Bun.serve<WsData>({
     // Is git even installed? A plain read like the rest of /git/*, so the
     // surface-wide origin/rebinding gate is the whole authorisation story.
     if (pathname === "/git/capability") return json(gitCapability());
+    // Every outside tool at once, for the Requirements pane. The per-panel
+    // capability routes above stay: each panel needs its own answer to render,
+    // and this one exists for the question none of them can answer alone.
+    // `force=1` is the Recheck button, which is the only reason a caller would
+    // want to pay for the probes again inside the cache window.
+    if (pathname === "/dependencies") return json(await dependencyReport(url.searchParams.get("force") === "1"));
     if (pathname === "/git/repos") {
       // `all=1` is the project picker: it needs the whole machine even when the
       // cockpit is currently scoped to one project, or there'd be no way out.
@@ -1063,8 +1103,34 @@ const server = Bun.serve<WsData>({
       return json(await listPrs(
         url.searchParams.get("root") || "",
         url.searchParams.get("filter") || "mine",
+        url.searchParams.get("state") || "open",
         url.searchParams.get("force") === "1",
+        url.searchParams.get("after") || undefined,
+        url.searchParams.get("q") || undefined,
       ));
+    }
+    if (pathname === "/prs/file-slice") {
+      return json(await fileSlice(url.searchParams.get("root") || "", url.searchParams.get("number") || "", {
+        path: url.searchParams.get("path") || "",
+        side: url.searchParams.get("side") || "RIGHT",
+        from: url.searchParams.get("from") || undefined,
+        to: url.searchParams.get("to") || undefined,
+      }));
+    }
+    if (pathname === "/prs/facets") {
+      return json(await facetOptions(url.searchParams.get("root") || ""));
+    }
+    if (pathname === "/prs/mentions") {
+      return json(await mentionables(url.searchParams.get("root") || ""));
+    }
+    if (pathname === "/prs/job-log") {
+      return json(await jobLog(url.searchParams.get("root") || "", url.searchParams.get("job") || ""));
+    }
+    if (pathname === "/prs/check-jobs") {
+      return json(await checkJobs(url.searchParams.get("root") || "", url.searchParams.get("number") || ""));
+    }
+    if (pathname === "/prs/counts") {
+      return json(await viewCounts(url.searchParams.get("root") || "", url.searchParams.get("state") || "open"));
     }
     if (pathname === "/prs/detail") {
       return json(await prDetail(
@@ -1102,17 +1168,24 @@ const server = Bun.serve<WsData>({
         case "/prs/comment": res = await addComment(root, n, b.body); break;
         case "/prs/reply": res = await replyToThread(root, n, b.commentId, b.body); break;
         case "/prs/thread-resolved": res = await setThreadResolved(root, b.threadId, b.resolved); break;
-        case "/prs/react": res = await react(root, b.commentId, b.content); break;
+        case "/prs/react": res = await react(root, b.nodeId ?? b.commentId, b.content, b.on); break;
+        case "/prs/comment-edit": res = await editComment(root, b.nodeId, b.body, b.kind); break;
+        case "/prs/comment-delete": res = await deleteComment(root, b.nodeId, b.kind); break;
+        case "/prs/file-viewed": res = await setFileViewed(root, b.prNodeId, b.path, b.viewed); break;
+        case "/prs/assignees": res = await setAssignees(root, n, b.add, b.remove); break;
+        case "/prs/milestone": res = await setMilestone(root, n, b.title); break;
         case "/prs/edit": res = await editPr(root, n, { title: b.title, body: b.body, base: b.base }); break;
         case "/prs/labels": res = await setLabels(root, n, b.add, b.remove); break;
         case "/prs/reviewers": res = await setReviewers(root, n, b.add, b.remove); break;
         case "/prs/draft": res = await setDraft(root, n, b.draft); break;
         case "/prs/update-branch": res = await updateBranch(root, n); break;
         case "/prs/rerun": res = await rerunFailedChecks(root, n); break;
-        case "/prs/merge": res = await mergePr(root, n, b.method, { deleteBranch: b.deleteBranch, auto: b.auto, headSha: b.headSha }); break;
+        case "/prs/rerun-jobs": res = await rerunJobs(root, b.what, b.id); break;
+        case "/prs/line-comment": res = await addLineComment(root, n, b); break;
+        case "/prs/apply-suggestion": res = await applySuggestion(root, n, b); break;
+        case "/prs/merge": res = await mergePr(root, n, b.method, { deleteBranch: b.deleteBranch, auto: b.auto, headSha: b.headSha, subject: b.subject, body: b.body, disableAuto: b.disableAuto }); break;
         case "/prs/close": res = await closePr(root, n, b.reopen === true); break;
-        case "/prs/local-review": res = await prepareLocalReview(root, n); break;
-        case "/prs/local-review-discard": res = await discardLocalReview(root, n); break;
+        case "/prs/review-prompt": res = await prepareReviewPrompt(root, n); break;
         default: res = null;
       }
       if (res) return json(res, res.ok ? 200 : 400);
@@ -1132,12 +1205,66 @@ const server = Bun.serve<WsData>({
     // --- multi-chat: drive claude sessions from the browser ---
     // `bypass` rides along so the mode picker can stop offering a mode the
     // server would silently downgrade — the downgrade itself stays server-side.
-    if (pathname === "/chat/enabled") return json({ enabled: CHAT_ENABLED, bypass: CHAT_BYPASS_ALLOWED });
+    // `tmuxEngine` tells the UI whether the pane engine can be offered at all,
+    // and says why not in the same breath — "tmux is not installed" and "not on
+    // Windows" need different words, and a toggle that silently does nothing is
+    // worse than one that explains itself.
+    if (pathname === "/chat/enabled") {
+      const pane = paneEngineCapability();
+      return json({
+        enabled: CHAT_ENABLED,
+        bypass: CHAT_BYPASS_ALLOWED,
+        tmuxEngine: { available: pane.available, reason: pane.reason, defaultOn: CHAT_ENGINE_DEFAULT === "tmux" },
+      });
+    }
     if (pathname === "/chat/send" && req.method === "POST") {
       if (!localOrigin(req)) return csrfBlocked();
       let b: any = {};
       try { b = await req.json(); } catch { return json({ error: "invalid json" }, 400); }
-      return chatStream(b.cwd, b.message, b.model, b.resumeId, b.mode, b.allowedTools, b.images);
+      return chatSend(b);
+    }
+    // The command that hands a chat to the user's own terminal. Server-side
+    // because the socket name and flags are the engine's business, and a string
+    // the UI assembled itself would drift the first time either changed.
+    // Closing a chat gives its warm CLI back. Safe because it destroys nothing:
+    // the conversation is on disk in the transcript, and resuming relaunches the
+    // pane with `--resume`. Without this the ~380MB sits there until the idle
+    // sweeper notices, half an hour after you said you were done with it.
+    if (pathname === "/chat/pane/close" && req.method === "POST") {
+      if (!localOrigin(req)) return csrfBlocked();
+      let b: any = {};
+      try { b = await req.json(); } catch { return json({ error: "invalid json" }, 400); }
+      const id = typeof b.session === "string" ? b.session : "";
+      if (!validPaneName(id)) return json({ error: "invalid session id" }, 400);
+      const was = await paneAlive(id);
+      if (was) await killPane(id);
+      forgetPane(id);
+      return json({ killed: was });
+    }
+    // Answer an interactive prompt without leaving the chat. The pane already
+    // takes Enter and Escape from us; arrows are the rest of what a picker
+    // needs, and sending them here beats telling someone to open a terminal to
+    // move a cursor one step.
+    if (pathname === "/chat/pane/key" && req.method === "POST") {
+      if (!localOrigin(req)) return csrfBlocked();
+      let b: any = {};
+      try { b = await req.json(); } catch { return json({ error: "invalid json" }, 400); }
+      const id = typeof b.session === "string" ? b.session : "";
+      if (!validPaneName(id)) return json({ error: "invalid session id" }, 400);
+      if (!sendableKey(b.key)) return json({ error: "key not allowed" }, 400);
+      if (!(await paneAlive(id))) return json({ error: "that chat's pane is gone" }, 409);
+      const r = await sendKey(id, b.key);
+      if (!r.ok) return json({ error: r.stderr.trim() || "could not send the key" }, 500);
+      // Hand back what the pane shows now, so the chat can redraw the prompt
+      // the keystroke just moved rather than guessing at it.
+      return json({ screen: await capturePane(id) });
+    }
+    if (pathname === "/chat/attach") {
+      const id = url.searchParams.get("session") || "";
+      const pane = paneEngineCapability();
+      if (!pane.available) return json({ error: pane.reason }, 400);
+      if (!validPaneName(id)) return json({ error: "invalid session id" }, 400);
+      return json({ command: attachCommand(id), live: await paneAlive(id) });
     }
 
     // --- LLM walkthrough: AI-authored review itinerary for the changes ---
@@ -1553,6 +1680,12 @@ function prune() {
 prune();
 setInterval(prune, 3_600_000);
 
+// Reclaim chat panes nobody has spoken to in a while. A warm CLI is the whole
+// point of the pane engine and also its whole cost (~380MB and climbing), so an
+// abandoned chat gives its memory back and resumes transparently next time.
+// A no-op when the engine is off, tmux is absent, or eviction is disabled.
+startPaneSweeper();
+
 // Read every Claude Code session on this machine from ~/.claude/projects, then
 // keep watching. This is what makes the dashboard cover all projects at once
 // instead of only the directory agentglass happens to run from.
@@ -1663,4 +1796,11 @@ watchLoop();
 {
   const gc = gitCapability();
   if (!gc.available) console.warn(`⚠  git not found on PATH — the git, diff, pull-request and terminal panels will not work. Install git to enable them.`);
+  // Said for the same reason, and it is the quieter failure of the two: with no
+  // python3 the hooks stay wired and fail on every event, so the dashboard is
+  // simply empty and nothing anywhere names the cause. Settings ▸ Requirements
+  // is the same list for anyone who never sees this log.
+  if (PTY_BACKEND !== "pty" && !Bun.which("python3") && !Bun.which("python")) {
+    console.warn(`⚠  python3 not found on PATH — the Claude Code hooks cannot forward events (nothing will stream live), and the terminal falls back to ${PTY_BACKEND} mode.`);
+  }
 }
